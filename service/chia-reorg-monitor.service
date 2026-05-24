@@ -37,23 +37,15 @@ ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
 Restart=on-failure
 RestartSec=10
 
-# Defence-in-depth. The monitor only needs: outbound network (TCP),
-# read access to the SMTP env file, and append access to the log file.
-# These directives are the subset that work for a user-mode service
-# (systemctl --user). Anything that drops capabilities from the bounding
-# set (PrivateDevices, ProtectKernel*, RestrictSUIDSGID, ProtectClock,
-# RestrictNamespaces, ProtectControlGroups) requires CAP_SETPCAP and
-# fails this unit with status=218/CAPABILITIES under systemd --user.
-# Promote them into this block only if you install as a system-level
-# service running as a dedicated user.
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-RestrictRealtime=true
-LockPersonality=true
-# Allow writes to the log directory only. Adjust to your log path.
-ReadWritePaths=%h/logs
+# Hardening directives are not set here. Even mild ones like
+# NoNewPrivileges=true can fail this unit with status=218/CAPABILITIES
+# under `systemctl --user` on some systemd/kernel combinations, because
+# they require CAP_SETPCAP to manipulate the bounding set and a
+# user-mode systemd doesn't have it. If you want defence-in-depth, the
+# right path is to install this as a SYSTEM-level service
+# (/etc/systemd/system/, ExecStart with User=chia-reorg, etc.) — then
+# PID 1 systemd has the caps it needs and the hardening directives
+# will apply correctly. See examples in the systemd.exec(5) man page.
 
 [Install]
 WantedBy=default.target
