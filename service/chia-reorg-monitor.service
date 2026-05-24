@@ -40,15 +40,16 @@ RestartSec=10
 # Defence-in-depth. The monitor only needs: outbound network (TCP),
 # read access to the SMTP env file, and append access to the log file.
 # These directives are the subset that work for a user-mode service
-# (systemctl --user). Kernel-tunables / kernel-modules / cgroup /
-# namespace restrictions require CAP_SYS_ADMIN and would fail this unit
-# with status=218/CAPABILITIES under systemd --user; promote them into
-# this block only if you install as a system-level service.
+# (systemctl --user). Anything that drops capabilities from the bounding
+# set (PrivateDevices, ProtectKernel*, RestrictSUIDSGID, ProtectClock,
+# RestrictNamespaces, ProtectControlGroups) requires CAP_SETPCAP and
+# fails this unit with status=218/CAPABILITIES under systemd --user.
+# Promote them into this block only if you install as a system-level
+# service running as a dedicated user.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-PrivateDevices=true
 RestrictRealtime=true
 LockPersonality=true
 # Allow writes to the log directory only. Adjust to your log path.
