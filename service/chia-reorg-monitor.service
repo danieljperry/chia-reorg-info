@@ -1,0 +1,41 @@
+# chia-reorg-monitor.service — systemd user service for the re-org monitor.
+#
+# Install (no root required):
+#
+#   1. Edit the three angle-bracket placeholders below: <node-bin> (output of
+#      `which node`), <install-path> (absolute path to your chia-reorg-info
+#      checkout), and <smtp-env-file>. Customize --recipient as needed.
+#   2. mkdir -p ~/.config/systemd/user
+#   3. cp service/chia-reorg-monitor.service ~/.config/systemd/user/
+#   4. systemctl --user daemon-reload
+#   5. systemctl --user enable --now chia-reorg-monitor
+#   6. Logs:
+#        journalctl --user -u chia-reorg-monitor -f   (stderr mirror)
+#        tail -f ~/logs/reorg_monitor.log             (the monitor's log)
+#
+# Stop / uninstall:
+#   systemctl --user disable --now chia-reorg-monitor
+#   rm ~/.config/systemd/user/chia-reorg-monitor.service
+#   systemctl --user daemon-reload
+#
+# Notes:
+#   - User services stop at logout by default. To keep the monitor running
+#     while logged out: `sudo loginctl enable-linger $USER`.
+#   - systemd does not expand $HOME or ~ inside ExecStart. Use absolute paths.
+
+[Unit]
+Description=chia-reorg-info re-org monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
+  --network mainnet \
+  --recipient you@example.com:1 \
+  --smtp-env-file <smtp-env-file>
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

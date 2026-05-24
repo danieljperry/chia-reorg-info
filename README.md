@@ -1,0 +1,261 @@
+# chia-reorg-info
+
+Two complementary tools for analysing Chia blockchain re-organisations, with **no MCP dependency**. Everything runs locally or against the public [coinset.org](https://www.coinset.org) full-node API.
+
+- **Reorg Finder** — a bash script that queries a local Chia v2 SQLite database for heights that have multiple block records (orphaned siblings of re-orged blocks). Good for retrospective audits.
+- **Reorg Monitor** — a long-running Node CLI (also installable as a Linux service) that polls the chain in real time, detects re-orgs as they happen, and optionally sends email alerts.
+
+The monitor binary also exposes two one-shot subcommands (`check_block_canonical` and `scan_chain_consistency`) used by the monitor internally.
+
+## Install
+
+```bash
+git clone https://github.com/danieljperry/chia-reorg-info.git
+cd chia-reorg-info
+npm install
+npm run build
+```
+
+Requires Node ≥ 20. The bash script also requires the `sqlite3` CLI (`sudo apt install sqlite3` on Debian/Ubuntu) and Python 3 (for timestamp parsing).
+
+---
+
+## Reorg Finder
+
+- **Requires read access to a local Chia v2 blockchain database file.** Default location: `~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite`.
+- **Re-orged blocks are not part of the canonical chain**, so your local database may not include every historical re-org — only those your node personally observed.
+- **The coinset.org API does not currently expose historical re-orgs**, so the script has no online fallback. That capability may be added later.
+- **The script only reads from the database**, so it is safe (and recommended) to run while a Chia full node is also running against the same DB.
+
+### Examples
+
+#### Show help
+
+```bash
+$ scripts/reorg-finder.sh -h
+reorg-finder.sh — scan the local Chia full-node DB for heights that
+have multiple blocks (i.e. re-orged heights with orphaned siblings).
+
+Requires read access to a Chia v2 full-node database file. By default this
+is the mainnet DB at ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite; pass
+-d to point at a different path (e.g. testnet11 or a copy on another disk).
+
+Step 1: find heights in the range that have >1 block.
+Step 2: for each such height, walk backward one block at a time (up to LIMIT
+        blocks) so a re-org that extends below the queried range is captured
+        in full. Group consecutive re-orged heights into clusters; each
+        cluster is one re-org event whose size is the cluster length.
+Step 3: list every block at the resulting heights with their hashes and
+        whether they're on the canonical chain.
+
+Usage:
+  ./reorg-finder.sh [-n COUNT] [-e END_HEIGHT] [-l LIMIT] [-m MIN_DEPTH]
+                    [-q [true|false]] [-qq [true|false]] [-d DB_PATH]
+
+  -n COUNT       Number of blocks to examine (default: 10)…
+  -e END_HEIGHT  Highest height to examine (default: full node peak via RPC)
+  ...
+```
+
+#### Scan the last 10 blocks (the default), with the header hashes for every block involved in a re-org
+
+```bash
+$ scripts/reorg-finder.sh
+Fetched peak height from full node RPC: 8769490
+Scanning heights 8769481..8769490 (10 blocks) in /home/you/.chia/mainnet/db/blockchain_v2_mainnet.sqlite
+
+Found a reorg of 1 block(s) (heights 8769486..8769486) (2026-05-24 13:58:42 HKT):
+
+Per-block detail (in_main_chain=1 is canonical, 0 is orphaned):
+height   header_hash                                                       prev_hash                                                         in_main_chain
+8769486  a4ec9dc5ddf1dd0b5c894c9989780e6be2bb9e69e418ad037504aa5f15833a41  d17e2cf5cc3e32a5c3f52ef031139775d9a5db20bf1b26b14ca3826dac54615f  1
+8769486  d17e2cf5cc3e32a5c3f52ef031139775d9a5db20bf1b26b14ca3826dac54615f  4b3d5c…                                                            0
+```
+
+#### Search 100 blocks ending at height 8,500,000, using a non-default database path
+
+```bash
+$ scripts/reorg-finder.sh -d /mnt/external/db/blockchain_v2_mainnet.sqlite -e 8500000 -n 100
+Scanning heights 8499901..8500000 (100 blocks) in /mnt/external/db/blockchain_v2_mainnet.sqlite
+
+Found 2 reorgs:
+  Reorg of 1 block(s) at heights 8499947..8499947 (2026-04-22 09:14:03 HKT)
+  Reorg of 2 block(s) at heights 8499981..8499982 (2026-04-22 09:30:27 to 09:30:46 HKT)
+…
+```
+
+#### Find every re-org of 2 blocks or more in the last week, no per-block detail
+
+```bash
+$ scripts/reorg-finder.sh -n 32256 -m 2 -q
+Fetched peak height from full node RPC: 8769490
+Scanning heights 8737235..8769490 (32256 blocks) in /home/you/.chia/mainnet/db/blockchain_v2_mainnet.sqlite
+
+Found 4 reorgs:
+  Reorg of 2 block(s) at heights 8742118..8742119 (2026-05-17 22:14:08 to 22:14:27 HKT)
+  Reorg of 2 block(s) at heights 8751107..8751108 (2026-05-20 06:07:32 to 06:07:51 HKT)
+  Reorg of 3 block(s) at heights 8756024..8756026 (2026-05-21 12:43:33 to 12:44:11 HKT)
+  Reorg of 2 block(s) at heights 8765912..8765913 (2026-05-24 03:18:54 to 03:19:13 HKT)
+```
+
+#### Count re-orgs of 7+ blocks ever recorded in the local database (one-line summary)
+
+```bash
+$ scripts/reorg-finder.sh -n g -m 7 -qq
+Found 0 reorgs of at least 7 blocks in the specified range.
+```
+
+(A typical mainnet node sees very few re-orgs deeper than 3 blocks. `-n g` is shorthand for "scan from `END_HEIGHT` down to genesis"; on a full mainnet DB this is a full-table scan and can take minutes to complete.)
+
+---
+
+## Reorg Monitor — as a CLI on Linux
+
+The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent.
+
+```bash
+$ node dist/index.js reorg_monitor --help
+Usage: chia-reorg-info reorg_monitor [options]
+
+Run the re-org monitor as a long-running CLI process. Logs status snapshots,
+re-org events, and outgoing email contents to a log file (and mirrors them to
+stderr). Send SIGINT (Ctrl-C) to stop.
+
+Options:
+  --network <mainnet|testnet11>   Network to monitor (default: mainnet)
+  --poll-interval <seconds>       Seconds between polls, 5–60 (default: 5)
+  --lookback <blocks>             Heights to re-check per poll, 1–32 (default: 5)
+  --status-every <seconds>        How often to log a status snapshot (default: 60)
+  --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.
+                                  min_blocks defaults to 1. Duplicates collapsed.
+  --log-file <path>               Log file path (default: ~/logs/reorg_monitor.log)
+  --no-log-file                   Disable file logging (stderr only)
+  --smtp-env-file <path>          Load SMTP_* env vars from a KEY=VALUE file.
+                                  Comments (#) and quoted values allowed.
+                                  Shell-exported vars take precedence.
+  --help, -h                      Show this help
+```
+
+Example: monitor mainnet, log to a custom path, alert two addresses (one at any re-org depth, one only for ≥3-block re-orgs), loading SMTP credentials from a dotenv file:
+
+```bash
+node dist/index.js reorg_monitor \
+  --network mainnet \
+  --poll-interval 5 \
+  --recipient oncall@example.com:1 \
+  --recipient ops-lead@example.com:3 \
+  --smtp-env-file ~/.config/chia-reorg-info.env \
+  --log-file ~/logs/reorg_monitor.log
+```
+
+Stop with `Ctrl-C` (SIGINT). The monitor handles graceful shutdown.
+
+### Other CLI subcommands
+
+The same binary also exposes two one-shot tools used internally by the monitor:
+
+```bash
+# Is the block at <height> still on the canonical chain?
+node dist/index.js check_block_canonical \
+  --height 8769490 \
+  --expected-hash 0xf6ed0359e3983e90f4cd278000f7360757c5578e0e6ecfeca61802317e92c79a
+
+# Scan a range for structural re-org indicators (chain_break, weight_regression,
+# timestamp_regression). Only catches deeper re-orgs that leave structural traces.
+node dist/index.js scan_chain_consistency --start-height 8769400 --end-height 8769490
+
+# Print the most recent status line from the monitor's log file
+node dist/index.js status
+```
+
+---
+
+## Reorg Monitor — as a Linux service
+
+Templates for systemd, launchd, and Windows NSSM are in [`service/`](service/).
+
+### systemd (user-level, no root required)
+
+```bash
+# 1. Edit service/chia-reorg-monitor.service: set <node-bin> (output of `which node`),
+#    <install-path> (absolute path to this checkout), and <smtp-env-file>.
+#    Customize --recipient.
+# 2. Install:
+mkdir -p ~/.config/systemd/user
+cp service/chia-reorg-monitor.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chia-reorg-monitor
+
+# 3. Keep running after logout (optional):
+sudo loginctl enable-linger $USER
+
+# 4. Check status / tail logs:
+systemctl --user status chia-reorg-monitor
+journalctl --user -u chia-reorg-monitor -f          # stderr mirror
+tail -f ~/logs/reorg_monitor.log                    # the monitor's own log
+
+# 5. Stop / uninstall:
+systemctl --user stop chia-reorg-monitor
+systemctl --user disable chia-reorg-monitor
+rm ~/.config/systemd/user/chia-reorg-monitor.service
+systemctl --user daemon-reload
+```
+
+The unit's `ExecStart` defaults to running `node <install-path>/dist/index.js reorg_monitor` with `--smtp-env-file`, so SMTP secrets stay in the env file (kept `chmod 600`) and never appear in `systemctl show` or `journalctl` output. See the comments at the top of `service/chia-reorg-monitor.service` for the full step-by-step.
+
+### macOS (launchd) and Windows (NSSM)
+
+See [`service/com.chia-reorg-info.reorg-monitor.plist`](service/com.chia-reorg-info.reorg-monitor.plist) and [`service/install-windows.ps1`](service/install-windows.ps1) — same shape, platform-specific install commands documented inline.
+
+---
+
+## Email setup
+
+The monitor uses [nodemailer](https://nodemailer.com/) for SMTP. Configure via environment variables (or a dotenv-style file passed with `--smtp-env-file`):
+
+| Variable | Required? | Notes |
+|---|---|---|
+| `SMTP_HOST` | yes (when `--recipient` is set) | e.g. `127.0.0.1` for Proton Mail Bridge, `smtp.gmail.com`, etc. |
+| `SMTP_PORT` | optional | Default `587` |
+| `SMTP_USER` | optional | Auth username |
+| `SMTP_PASS` | optional | Auth password — keep the env file `chmod 600` |
+| `SMTP_SECURE` | optional | Set to `true` to use TLS at connect time (port 465-style). Recommended for production. |
+| `SMTP_FROM` | optional | From address. Falls back to `SMTP_USER`, then `chia-reorg-info@localhost` |
+| `SMTP_CA_CERT_PATH` | optional | Path to a PEM CA cert. Needed when the SMTP server uses a self-signed certificate (e.g. Proton Mail Bridge). |
+
+### Dotenv file format
+
+Pass the file with `--smtp-env-file <path>`. Accepts the standard `KEY=VALUE` format plus an optional `export ` prefix so a shell-sourceable file works as-is. `#` comments and `'...'` / `"..."` quoted values are supported. Example:
+
+```
+# ~/.config/chia-reorg-info.env  (chmod 600)
+export SMTP_HOST=127.0.0.1
+export SMTP_PORT=1025
+export SMTP_USER="bridge-user@protonmail.com"
+export SMTP_PASS='your-bridge-token'
+export SMTP_SECURE=true
+export SMTP_FROM=alerts@protonmail.com
+export SMTP_CA_CERT_PATH=/home/you/.config/protonmail-bridge-ca.pem
+```
+
+Shell-exported variables take precedence over the file, so you can override one-off in your shell without editing the file.
+
+### What the monitor will email
+
+When a re-org is detected, the monitor sends one email per eligible recipient. The subject is `Re-org of depth N detected on Chia mainnet` (or `Re-org of depth N-M ...` when the depth is a lower bound because polls were skipped during chain instability). The body lists each affected block: height, old header hash, new header hash, depth, distance from the current peak, and the original block record JSON, plus a link to spacescan.io for the canonical replacement.
+
+A "Skipping recipient (threshold not met)" line is logged when a re-org is too shallow for a given recipient's `min_blocks` threshold. Worst-case dispatch is used — if depth is ambiguous (chain advanced past the last fully-observed peak during the re-org window), the upper-bound depth is what's compared against the threshold so you are never silently filtered out.
+
+## Development
+
+```bash
+npm test           # run the full vitest suite
+npm run lint       # eslint
+npm run typecheck  # tsc --noEmit
+npm run dev        # tsx src/index.ts (run from source)
+npm run build      # compile to dist/
+```
+
+## License
+
+MIT

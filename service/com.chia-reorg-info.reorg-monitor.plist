@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the chia-reorg-info re-org monitor (per-user).
+
+  Install (no root required):
+
+    1. Edit the three placeholders below: <node-bin> (output of `which node`,
+       typically /opt/homebrew/bin/node on Apple Silicon or /usr/local/bin/node
+       on Intel), <install-path> (absolute path to your chia-reorg-info
+       checkout), and <smtp-env-file>. Customize --recipient as needed.
+    2. mkdir -p ~/Library/LaunchAgents
+    3. cp service/com.chia-reorg-info.reorg-monitor.plist ~/Library/LaunchAgents/
+    4. launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.chia-reorg-info.reorg-monitor.plist
+    5. launchctl enable gui/$UID/com.chia-reorg-info.reorg-monitor
+    6. Logs:
+         tail -f ~/logs/reorg_monitor.log
+         tail -f ~/logs/reorg_monitor.launchd.err    (launchd captures stderr here)
+
+  Stop / uninstall:
+    launchctl bootout gui/$UID/com.chia-reorg-info.reorg-monitor
+    rm ~/Library/LaunchAgents/com.chia-reorg-info.reorg-monitor.plist
+
+  Notes:
+    - launchd does not expand $HOME or ~ inside ProgramArguments. Use absolute
+      paths everywhere.
+    - KeepAlive with SuccessfulExit=false restarts the process on failure but
+      not after a clean exit. ThrottleInterval caps the restart rate.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.chia-reorg-info.reorg-monitor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string><node-bin></string>
+    <string><install-path>/dist/index.js</string>
+    <string>reorg_monitor</string>
+    <string>--network</string>
+    <string>mainnet</string>
+    <string>--recipient</string>
+    <string>you@example.com:1</string>
+    <string>--smtp-env-file</string>
+    <string><smtp-env-file></string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/you/logs/reorg_monitor.launchd.err</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/you/logs/reorg_monitor.launchd.out</string>
+</dict>
+</plist>
