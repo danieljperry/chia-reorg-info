@@ -16,7 +16,10 @@ export async function setLogFile(path: string | null): Promise<void> {
   }
   if (path === null) return;
   await mkdir(dirname(path), { recursive: true });
-  const stream = createWriteStream(path, { flags: 'a' });
+  // 0o600 — the log can contain recipient email addresses and outgoing email
+  // body text; restrict to the owning user. (mode is only honored when the
+  // file is newly created; pre-existing log files keep their current perms.)
+  const stream = createWriteStream(path, { flags: 'a', mode: 0o600 });
   stream.on('error', (err: unknown) => {
     fileStream = null;
     process.stderr.write(`[logger] file logging disabled: ${safeMessage(err)}\n`);

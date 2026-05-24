@@ -1197,7 +1197,7 @@ describe('reorg monitor detection logic', () => {
     delete process.env.SMTP_USER;
   });
 
-  it('falls back to chia-explorer@localhost when neither SMTP_FROM nor SMTP_USER is set', async () => {
+  it('falls back to chia-reorg-info@localhost when neither SMTP_FROM nor SMTP_USER is set', async () => {
     delete process.env.SMTP_FROM;
     delete process.env.SMTP_USER;
     startMonitor({
@@ -1220,7 +1220,7 @@ describe('reorg monitor detection logic', () => {
     await Promise.resolve();
 
     const call = mockSendMail.mock.calls[0]![0] as { from: string };
-    expect(call.from).toBe('chia-explorer@localhost');
+    expect(call.from).toBe('chia-reorg-info@localhost');
   });
 
   // Three-recipient tests: no-min-specified (defaults to 1), explicit min-1, explicit min-3.

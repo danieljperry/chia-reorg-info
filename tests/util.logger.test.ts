@@ -11,7 +11,7 @@ describe('logger', () => {
   let logPath: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'chia-explorer-logger-'));
+    dir = mkdtempSync(join(tmpdir(), 'chia-reorg-info-logger-'));
     logPath = join(dir, 'monitor.log');
     setStderrEnabled(false);
   });

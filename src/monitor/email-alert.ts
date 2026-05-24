@@ -129,7 +129,7 @@ export async function sendReorgAlert(
   const peakLine = `Peak height at detection: ${peakHeight.toLocaleString()} (${localDate} ${localTime} ${timeZone})`;
   const text = [intro, peakLine, ``, blockSections].join('\n');
 
-  const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? 'chia-explorer@localhost';
+  const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? 'chia-reorg-info@localhost';
 
   logBlock('info', 'Sending re-org alert email', text, {
     to,
