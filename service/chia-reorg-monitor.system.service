@@ -1,0 +1,97 @@
+# chia-reorg-monitor.system.service — SYSTEM-level systemd unit for the
+# chia-reorg-info re-org monitor.
+#
+# Use this template if your `systemctl --user` install hits status=218/
+# CAPABILITIES — usually a systemd-249-or-older quirk. Installed at the
+# system level, PID 1 systemd has CAP_SETPCAP and can apply the full
+# hardening set; the actual service still runs as a dedicated
+# unprivileged user, so the security posture is strictly better than the
+# user-mode install.
+#
+# Install (one-time, as root):
+#
+#   1. Create the system user (no shell, no home):
+#        sudo useradd --system --shell /usr/sbin/nologin --no-create-home chia-reorg
+#
+#   2. Install the project to /opt/ (or wherever; update ExecStart below):
+#        sudo git clone https://github.com/danieljperry/chia-reorg-info /opt/chia-reorg-info
+#        cd /opt/chia-reorg-info && sudo npm install && sudo npm run build
+#        sudo chown -R chia-reorg:chia-reorg /opt/chia-reorg-info
+#
+#   3. Edit the placeholders below: <node-bin> (output of `which node` —
+#      avoid nvm paths under user homes for a system service; install node
+#      via apt or use /usr/local/bin/node symlinked to your preferred
+#      binary), <install-path>, and the --recipient address.
+#
+#   4. Install the unit and place the SMTP env file:
+#        sudo cp service/chia-reorg-monitor.system.service \
+#             /etc/systemd/system/chia-reorg-monitor.service
+#        sudo mkdir -p /etc/chia-reorg-info
+#        sudo $EDITOR /etc/chia-reorg-info/smtp.env   # see README "Email setup"
+#        sudo chown root:chia-reorg /etc/chia-reorg-info/smtp.env
+#        sudo chmod 0640 /etc/chia-reorg-info/smtp.env
+#
+#   5. Enable and start:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now chia-reorg-monitor
+#
+#   6. Logs:
+#        sudo journalctl -u chia-reorg-monitor -f                    # stderr
+#        sudo tail -f /var/log/chia-reorg-monitor/reorg_monitor.log  # log file
+#
+# Uninstall:
+#   sudo systemctl disable --now chia-reorg-monitor
+#   sudo rm /etc/systemd/system/chia-reorg-monitor.service
+#   sudo systemctl daemon-reload
+#   sudo userdel chia-reorg
+#   sudo rm -rf /etc/chia-reorg-info /var/log/chia-reorg-monitor /opt/chia-reorg-info
+
+[Unit]
+Description=chia-reorg-info re-org monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chia-reorg
+Group=chia-reorg
+ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
+  --network mainnet \
+  --recipient you@example.com:1 \
+  --smtp-env-file /etc/chia-reorg-info/smtp.env \
+  --log-file /var/log/chia-reorg-monitor/reorg_monitor.log
+Restart=on-failure
+RestartSec=10
+
+# systemd auto-creates these with the right ownership and mode.
+LogsDirectory=chia-reorg-monitor
+LogsDirectoryMode=0750
+ConfigurationDirectory=chia-reorg-info
+ConfigurationDirectoryMode=0750
+
+# Full hardening — works because PID 1 systemd has the caps to apply it
+# even though the actual service runs unprivileged.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# We need zero capabilities — only outbound TCP.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

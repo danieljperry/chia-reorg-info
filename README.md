@@ -203,6 +203,50 @@ systemctl --user daemon-reload
 
 The unit's `ExecStart` defaults to running `node <install-path>/dist/index.js reorg_monitor` with `--smtp-env-file`, so SMTP secrets stay in the env file (kept `chmod 600`) and never appear in `systemctl show` or `journalctl` output. See the comments at the top of `service/chia-reorg-monitor.service` for the full step-by-step.
 
+This template ships **without** in-unit hardening directives, because on systemd 249 and older (Ubuntu 22.04 LTS, Debian 11) `systemctl --user` cannot manipulate the capability bounding set, and several hardening directives (`PrivateDevices`, `ProtectKernelTunables`, `NoNewPrivileges`, etc.) fail the unit with `status=218/CAPABILITIES`. The user-mode install therefore inherits your account's full permissions; the security posture relies on the monitor being a small program that only does outbound HTTPS + SMTP + log appends. If you want defence-in-depth (full hardening: no kernel-mod loading, locked-down sysctl, restricted namespaces, etc.), use the system-level template below.
+
+### systemd (system-level, full hardening)
+
+Use this path when you want defence-in-depth, or when the user-level install fails with `status=218/CAPABILITIES` on older systemd versions. The service runs as a dedicated unprivileged `chia-reorg` user, but PID 1 systemd applies the hardening directives because it has the capabilities to do so.
+
+```bash
+# 1. Create system user, install project, fix ownership:
+sudo useradd --system --shell /usr/sbin/nologin --no-create-home chia-reorg
+sudo git clone https://github.com/danieljperry/chia-reorg-info /opt/chia-reorg-info
+cd /opt/chia-reorg-info && sudo npm install && sudo npm run build
+sudo chown -R chia-reorg:chia-reorg /opt/chia-reorg-info
+
+# 2. Edit service/chia-reorg-monitor.system.service:
+#    set <node-bin> and <install-path>, customize --recipient.
+#    For a system service, avoid nvm-installed node under user homes —
+#    use a system-wide install (apt, nodesource, or a /usr/local/bin/node symlink).
+
+# 3. Install the unit and the SMTP env file:
+sudo cp service/chia-reorg-monitor.system.service \
+        /etc/systemd/system/chia-reorg-monitor.service
+sudo mkdir -p /etc/chia-reorg-info
+sudo $EDITOR /etc/chia-reorg-info/smtp.env   # contents per "Email setup" below
+sudo chown root:chia-reorg /etc/chia-reorg-info/smtp.env
+sudo chmod 0640 /etc/chia-reorg-info/smtp.env
+
+# 4. Enable and start:
+sudo systemctl daemon-reload
+sudo systemctl enable --now chia-reorg-monitor
+
+# 5. Check status / tail logs:
+sudo systemctl status chia-reorg-monitor
+sudo journalctl -u chia-reorg-monitor -f                    # stderr mirror
+sudo tail -f /var/log/chia-reorg-monitor/reorg_monitor.log  # the monitor's own log
+
+# 6. Stop / uninstall:
+sudo systemctl disable --now chia-reorg-monitor
+sudo rm /etc/systemd/system/chia-reorg-monitor.service
+sudo systemctl daemon-reload
+# Optionally also: sudo userdel chia-reorg && sudo rm -rf /etc/chia-reorg-info /var/log/chia-reorg-monitor /opt/chia-reorg-info
+```
+
+`/var/log/chia-reorg-monitor/` and `/etc/chia-reorg-info/` are auto-created by systemd with the right ownership thanks to `LogsDirectory=` / `ConfigurationDirectory=` in the unit.
+
 ### macOS (launchd) and Windows (NSSM)
 
 See [`service/com.chia-reorg-info.reorg-monitor.plist`](service/com.chia-reorg-info.reorg-monitor.plist) and [`service/install-windows.ps1`](service/install-windows.ps1) — same shape, platform-specific install commands documented inline.
