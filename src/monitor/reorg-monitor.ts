@@ -65,6 +65,14 @@ const state = {
   alertedReorgs: new Set<string>(), // `${height}:${new_hash}` pairs already alerted on this session
   timer: null as NodeJS.Timeout | null,
   generation: 0, // incremented on start/stop; in-flight polls bail if it changes mid-execution
+  // Optional hooks for dual-source mode. When set, each newly-detected reorg
+  // is also routed through onReorg, and onPeak fires after each successful
+  // poll. These do NOT replace the existing per-recipient inline dispatch —
+  // they run in addition to it. For dual-source mode the CLI passes an empty
+  // alert_recipients (so inline dispatch is a no-op) and routes through the
+  // dual-source coordinator instead.
+  onReorg: null as ((event: ReorgEvent) => void) | null,
+  onPeak: null as ((peak: number) => void) | null,
 };
 
 function redactEmail(email: string): string {
@@ -198,6 +206,10 @@ export async function _pollOnce(): Promise<void> {
     // before reaching here) don't advance this — that's the whole point.
     state.last_observed_peak = peak;
 
+    // Dual-source hook: tell the coordinator about our latest peak so it can
+    // release buffered events whose `high + 2` is now ≤ peak.
+    if (state.onPeak !== null) state.onPeak(peak);
+
     // If we detected a re-org whose top reaches our previous *observed* peak
     // AND the chain has advanced beyond it, the actual cascade may have
     // extended into heights we never observed (no baseline to compare). The
@@ -224,6 +236,13 @@ export async function _pollOnce(): Promise<void> {
       state.alertedReorgs.add(key);
       return true;
     });
+
+    // Dual-source hook: forward each new reorg to the coordinator. The inline
+    // per-recipient dispatch below still runs, but in dual-source mode the CLI
+    // passes alert_recipients=[] so it's a no-op.
+    if (state.onReorg !== null) {
+      for (const r of newReorgsForAlert) state.onReorg(r);
+    }
 
     // Send one batched email per recipient containing all eligible reorgs from this poll.
     // Filter on max_depth (worst-case true depth) so a re-org with uncertain
@@ -291,6 +310,10 @@ export function startMonitor(opts: {
   lookback_blocks: number;
   network: Network;
   alert_recipients?: AlertRecipient[];
+  /** Dual-source hook: called once per newly-detected reorg. */
+  on_reorg?: (event: ReorgEvent) => void;
+  /** Dual-source hook: called after each successful poll completes. */
+  on_peak?: (peak: number) => void;
 }): void {
   state.generation++;
   if (state.timer !== null) clearTimeout(state.timer);
@@ -299,6 +322,8 @@ export function startMonitor(opts: {
   state.poll_interval_seconds = opts.poll_interval_seconds;
   state.lookback_blocks = opts.lookback_blocks;
   state.alert_recipients = opts.alert_recipients ?? [];
+  state.onReorg = opts.on_reorg ?? null;
+  state.onPeak = opts.on_peak ?? null;
   state.started_at = new Date().toISOString();
   state.poll_count = 0;
   state.peak_height = null;
@@ -327,6 +352,8 @@ export function stopMonitor(): void {
     state.timer = null;
   }
   state.active = false;
+  state.onReorg = null;
+  state.onPeak = null;
   if (wasActive) {
     log('info', 'Monitor stopped', {
       poll_count: state.poll_count,

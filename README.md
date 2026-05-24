@@ -107,11 +107,43 @@ Found 0 reorgs of at least 7 blocks in the specified range.
 
 (A typical mainnet node sees very few re-orgs deeper than 3 blocks. `-n g` is shorthand for "scan from `END_HEIGHT` down to genesis"; on a full mainnet DB this is a full-table scan and can take minutes to complete.)
 
+#### Machine-readable output
+
+For programmatic use (e.g. the monitor's `--source local` mode below), pass `--json` to emit a single JSON object instead of the human-readable report. Combine with `--peak-from db` to fetch the peak from the SQLite DB instead of the full-node RPC, so the script works with no running node:
+
+```bash
+$ scripts/reorg-finder.sh -n 10 --json --peak-from db | jq .
+{
+  "network": "mainnet",
+  "start_height": 8769481,
+  "end_height": 8769490,
+  "scanned_at_unix": 1748097600,
+  "peak_at_scan": 8769490,
+  "reorgs": [
+    { "low": 8769486, "high": 8769486, "depth": 1, "ts_low_unix": 1748097540, "ts_high_unix": 1748097540 }
+  ]
+}
+```
+
+`--json` is incompatible with `-q` / `-qq`. All existing flags continue to work unchanged in text mode.
+
 ---
 
 ## Reorg Monitor — as a CLI on Linux
 
 The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent.
+
+### Detection sources
+
+The monitor supports three detection sources via `--source`:
+
+| `--source` | What it polls | When to use |
+|---|---|---|
+| `coinset` (default) | The public coinset.org HTTP API | No local node required; depth is sometimes a lower bound (range). |
+| `local` | The local Chia v2 SQLite DB via `scripts/reorg-finder.sh` | Requires read access to a full-node DB file; gives exact depths. |
+| `both` | Coinset **and** local in parallel, with cross-referenced results | Highest confidence. Each re-org is held until two blocks past its `high` and then emailed as one of: same re-org on both, Coinset-only, or local-only. |
+
+In `both` mode a re-org is treated as the same event when the two sources' height ranges overlap **and** their depth ranges overlap (Coinset reports depth as a `min-max` range; local reports an exact depth).
 
 ```bash
 $ node dist/index.js reorg_monitor --help
@@ -123,8 +155,13 @@ stderr). Send SIGINT (Ctrl-C) to stop.
 
 Options:
   --network <mainnet|testnet11>   Network to monitor (default: mainnet)
-  --poll-interval <seconds>       Seconds between polls, 5–60 (default: 5)
-  --lookback <blocks>             Heights to re-check per poll, 1–32 (default: 5)
+  --source <coinset|local|both>   Detection source(s) (default: coinset)
+  --poll-interval <seconds>       Coinset poll interval, 5–60 (default: 5)
+  --lookback <blocks>             Coinset heights re-checked per poll, 1–32 (default: 5)
+  --local-poll-interval <seconds> Local-DB poll interval, 5–3600 (default: 10)
+  --local-lookback <blocks>       Local-DB heights re-checked per poll, 1–1000 (default: 5)
+  --db-path <path>                Path to blockchain_v2_mainnet.sqlite
+                                  (default: $CHIA_DB or ~/.chia/mainnet/db/…)
   --status-every <seconds>        How often to log a status snapshot (default: 60)
   --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.
                                   min_blocks defaults to 1. Duplicates collapsed.
@@ -136,7 +173,7 @@ Options:
   --help, -h                      Show this help
 ```
 
-Example: monitor mainnet, log to a custom path, alert two addresses (one at any re-org depth, one only for ≥3-block re-orgs), loading SMTP credentials from a dotenv file:
+Example (Coinset only — the default): monitor mainnet, log to a custom path, alert two addresses (one at any re-org depth, one only for ≥3-block re-orgs), loading SMTP credentials from a dotenv file:
 
 ```bash
 node dist/index.js reorg_monitor \
@@ -147,6 +184,31 @@ node dist/index.js reorg_monitor \
   --smtp-env-file ~/.config/chia-reorg-info.env \
   --log-file ~/logs/reorg_monitor.log
 ```
+
+Example (local DB only — no Coinset traffic, uses your full-node DB):
+
+```bash
+node dist/index.js reorg_monitor \
+  --source local \
+  --db-path ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+  --local-poll-interval 10 \
+  --recipient oncall@example.com:1 \
+  --smtp-env-file ~/.config/chia-reorg-info.env
+```
+
+Example (both sources, with cross-referenced comparison emails):
+
+```bash
+node dist/index.js reorg_monitor \
+  --source both \
+  --poll-interval 5 \
+  --local-poll-interval 10 \
+  --db-path ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+  --recipient oncall@example.com:1 \
+  --smtp-env-file ~/.config/chia-reorg-info.env
+```
+
+In `both` mode each email's subject is suffixed with one of `— confirmed by Coinset + local DB`, `— Coinset only`, or `— local DB only`, and the body opens with a one-line statement of the comparison result.
 
 Stop with `Ctrl-C` (SIGINT). The monitor handles graceful shutdown.
 

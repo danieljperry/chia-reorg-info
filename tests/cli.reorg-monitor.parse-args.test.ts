@@ -13,7 +13,37 @@ describe('cli monitor parseArgs', () => {
       recipients: [],
       logFile: join(homedir(), 'logs', 'reorg_monitor.log'),
       smtpEnvFile: null,
+      source: 'coinset',
+      localPollIntervalSeconds: 10,
+      localLookbackBlocks: 5,
+      dbPath:
+        process.env.CHIA_DB ?? join(homedir(), '.chia', 'mainnet', 'db', 'blockchain_v2_mainnet.sqlite'),
     });
+  });
+
+  it('parses --source values', () => {
+    expect(parseArgs(['--source', 'coinset']).source).toBe('coinset');
+    expect(parseArgs(['--source', 'local']).source).toBe('local');
+    expect(parseArgs(['--source', 'both']).source).toBe('both');
+  });
+
+  it('rejects invalid --source', () => {
+    expect(() => parseArgs(['--source', 'bogus'])).toThrow(/must be one of/);
+  });
+
+  it('parses --local-poll-interval with range 5-3600', () => {
+    expect(parseArgs(['--local-poll-interval', '20']).localPollIntervalSeconds).toBe(20);
+    expect(() => parseArgs(['--local-poll-interval', '4'])).toThrow(/integer between 5 and 3600/);
+    expect(() => parseArgs(['--local-poll-interval', '3601'])).toThrow(/integer between 5 and 3600/);
+  });
+
+  it('parses --local-lookback with range 1-1000', () => {
+    expect(parseArgs(['--local-lookback', '50']).localLookbackBlocks).toBe(50);
+    expect(() => parseArgs(['--local-lookback', '0'])).toThrow(/integer between 1 and 1000/);
+  });
+
+  it('parses --db-path', () => {
+    expect(parseArgs(['--db-path', '/mnt/chia/db.sqlite']).dbPath).toBe('/mnt/chia/db.sqlite');
   });
 
   it('parses --log-file', () => {

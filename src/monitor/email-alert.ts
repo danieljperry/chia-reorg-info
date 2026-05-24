@@ -47,11 +47,20 @@ export function logSmtpConfig(): void {
   }
 }
 
+export type EmailExtras = {
+  /** Appended to the subject line, e.g. " — confirmed by Coinset + local DB". */
+  subjectSuffix?: string;
+  /** Prepended to the body (before the existing intro). Used by dual-source
+   *  mode to insert the "same reorg / Coinset only / local only" sentence. */
+  introPrepend?: string;
+};
+
 export async function sendReorgAlert(
   to: string,
   network: string,
   reorgs: ReorgEvent[],
-  peakHeight: number
+  peakHeight: number,
+  extras: EmailExtras = {}
 ): Promise<void> {
   const caPath = process.env.SMTP_CA_CERT_PATH;
   const ca = caPath ? await readFile(caPath, 'utf8') : undefined;
@@ -83,10 +92,11 @@ export async function sendReorgAlert(
       ? ''
       : ` (range due to ${upperBound - lowerBound} unobserved block(s) above the cascade)`;
 
-  const subject =
+  const baseSubject =
     clusterCount === 1
       ? `Re-org of depth ${depthLabel} detected on Chia ${network}`
       : `${clusterCount} re-orgs detected on Chia ${network} (max depth ${depthLabel})`;
+  const subject = baseSubject + (extras.subjectSuffix ?? '');
 
   const intro =
     clusterCount === 1
@@ -127,7 +137,10 @@ export async function sendReorgAlert(
   const localTime = now.toLocaleTimeString();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const peakLine = `Peak height at detection: ${peakHeight.toLocaleString()} (${localDate} ${localTime} ${timeZone})`;
-  const text = [intro, peakLine, ``, blockSections].join('\n');
+  const parts = extras.introPrepend
+    ? [extras.introPrepend, ``, intro, peakLine, ``, blockSections]
+    : [intro, peakLine, ``, blockSections];
+  const text = parts.join('\n');
 
   const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? 'chia-reorg-info@localhost';
 

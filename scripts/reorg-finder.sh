@@ -22,6 +22,7 @@
 # Usage:
 #   ./reorg-finder.sh [-n COUNT] [-e END_HEIGHT] [-l LIMIT] [-m MIN_DEPTH]
 #                     [-q [true|false]] [-qq [true|false]] [-d DB_PATH]
+#                     [--json] [--peak-from rpc|db]
 #
 #   -n COUNT       Number of blocks to examine (default: 10). Pass `g` or
 #                  `genesis` to scan every block from END_HEIGHT down to the
@@ -40,6 +41,14 @@
 #                  range." and nothing else (default: false). Invoke as bare
 #                  `-qq` or `-qq true`. Overrides -q.
 #   -d DB_PATH     Path to blockchain_v2_mainnet.sqlite (overrides CHIA_DB env)
+#   --json         Emit a single JSON object to stdout and nothing else.
+#                  Suppresses the prose report. Intended for programmatic
+#                  consumers (e.g. the reorg_monitor's local poller).
+#                  Incompatible with -q and -qq.
+#   --peak-from rpc|db  When -e is not given, source the peak height from
+#                  the full-node RPC (default, rpc) or from the local DB via
+#                  `SELECT MAX(height) FROM full_blocks` (db). `db` avoids
+#                  any RPC dependency — useful for monitor-driven use.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -61,6 +70,8 @@ main() {
   local MIN_DEPTH=1
   local QUIET="false"
   local QQ_QUIET="false"
+  local JSON_OUT="false"
+  local PEAK_FROM="rpc"
   local DB_PATH="${CHIA_DB:-$HOME/.chia/mainnet/db/blockchain_v2_mainnet.sqlite}"
   local SSL_DIR="${CHIA_SSL_DIR:-$HOME/.chia/mainnet/config/ssl/full_node}"
   local CERT_PATH="$SSL_DIR/private_full_node.crt"
@@ -73,8 +84,9 @@ main() {
   }
 
 # Pre-process argv:
-#   - `-qq` is a multi-char flag that getopts can't handle, so we consume it
-#     directly into $QQ_QUIET and drop it from the arg list.
+#   - `-qq`, `--json`, `--peak-from` are multi-char flags getopts can't handle,
+#     so we consume them directly into local state and drop them from the arg
+#     list. They never reach getopts.
 #   - `-q` (without a value) is normalized to `-q true`, so the rest of the
 #     code can treat -q uniformly as a value-required option.
 local PRE_ARGS=()
@@ -84,6 +96,16 @@ while [[ $# -gt 0 ]]; do
       ""|-*)  QQ_QUIET="true"; shift ;;
       *)      QQ_QUIET="$2"; shift 2 ;;
     esac
+  elif [[ "$1" == "--json" ]]; then
+    JSON_OUT="true"
+    shift
+  elif [[ "$1" == "--peak-from" ]]; then
+    if [[ -z "${2:-}" ]]; then
+      echo "Error: --peak-from requires a value (rpc or db)" >&2
+      exit 2
+    fi
+    PEAK_FROM="$2"
+    shift 2
   elif [[ "$1" == "-q" ]]; then
     PRE_ARGS+=("-q")
     case "${2:-}" in
@@ -155,20 +177,50 @@ case "${QQ_QUIET,,}" in
     ;;
 esac
 
+# Validate --peak-from value.
+case "$PEAK_FROM" in
+  rpc|db) ;;
+  *)
+    echo "Error: --peak-from must be 'rpc' or 'db' (got: $PEAK_FROM)" >&2
+    exit 2
+    ;;
+esac
+
+# --json is incompatible with -q / -qq (predictable behavior).
+if [[ "$JSON_OUT" == "true" ]] && { [[ "$QUIET" == "true" ]] || [[ "$QQ_QUIET" == "true" ]]; }; then
+  echo "Error: --json is incompatible with -q / -qq" >&2
+  exit 2
+fi
+
 if [[ -z "$END_HEIGHT" ]]; then
-  if [[ ! -r "$CERT_PATH" || ! -r "$KEY_PATH" ]]; then
-    echo "Error: full-node SSL credentials not readable at:" >&2
-    echo "  $CERT_PATH" >&2
-    echo "  $KEY_PATH" >&2
-    echo "Pass -e END_HEIGHT, or set CHIA_SSL_DIR." >&2
-    exit 1
+  if [[ "$PEAK_FROM" == "db" ]]; then
+    # Local-only peak: SELECT MAX(height) FROM full_blocks. Requires the DB
+    # to be readable (checked further below); error out cleanly here if not.
+    if [[ ! -r "$DB_PATH" ]]; then
+      echo "Error: --peak-from db requires a readable DB at $DB_PATH (set -d / CHIA_DB)" >&2
+      exit 1
+    fi
+    END_HEIGHT=$(sqlite3 "file:${DB_PATH}?mode=ro" "SELECT MAX(height) FROM full_blocks;")
+    if [[ -z "$END_HEIGHT" ]] || [[ "$END_HEIGHT" == "" ]]; then
+      echo "Error: --peak-from db returned no rows (is the DB populated?)" >&2
+      exit 1
+    fi
+    [[ "$QQ_QUIET" == "false" && "$JSON_OUT" == "false" ]] && echo "Resolved peak height from DB: $END_HEIGHT"
+  else
+    if [[ ! -r "$CERT_PATH" || ! -r "$KEY_PATH" ]]; then
+      echo "Error: full-node SSL credentials not readable at:" >&2
+      echo "  $CERT_PATH" >&2
+      echo "  $KEY_PATH" >&2
+      echo "Pass -e END_HEIGHT, set CHIA_SSL_DIR, or use --peak-from db." >&2
+      exit 1
+    fi
+    END_HEIGHT=$(curl -sk -X POST \
+      --cert "$CERT_PATH" --key "$KEY_PATH" \
+      "${NODE_HOST}/get_blockchain_state" \
+      -H 'Content-Type: application/json' -d '{}' \
+      | python3 -c 'import sys, json; print(json.load(sys.stdin)["blockchain_state"]["peak"]["height"])')
+    [[ "$QQ_QUIET" == "false" && "$JSON_OUT" == "false" ]] && echo "Fetched peak height from full node RPC: $END_HEIGHT"
   fi
-  END_HEIGHT=$(curl -sk -X POST \
-    --cert "$CERT_PATH" --key "$KEY_PATH" \
-    "${NODE_HOST}/get_blockchain_state" \
-    -H 'Content-Type: application/json' -d '{}' \
-    | python3 -c 'import sys, json; print(json.load(sys.stdin)["blockchain_state"]["peak"]["height"])')
-  [[ "$QQ_QUIET" == "false" ]] && echo "Fetched peak height from full node RPC: $END_HEIGHT"
 fi
 
 if ! [[ "$END_HEIGHT" =~ ^[0-9]+$ ]]; then
@@ -186,7 +238,7 @@ if [[ "$START_HEIGHT" -lt 0 ]]; then
   START_HEIGHT=0
 fi
 
-if [[ "$QQ_QUIET" == "false" ]]; then
+if [[ "$QQ_QUIET" == "false" && "$JSON_OUT" == "false" ]]; then
   echo "Scanning heights $START_HEIGHT..$END_HEIGHT ($((END_HEIGHT - START_HEIGHT + 1)) blocks) in $DB_PATH"
   echo
 fi
@@ -211,7 +263,10 @@ SQL
 )
 
 if [[ -z "$IN_RANGE_HEIGHTS" ]]; then
-  if [[ "$QQ_QUIET" == "true" ]]; then
+  if [[ "$JSON_OUT" == "true" ]]; then
+    printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[]}\n' \
+      "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT"
+  elif [[ "$QQ_QUIET" == "true" ]]; then
     echo "Found 0 reorgs of at least $MIN_DEPTH blocks in the specified range."
   else
     echo "No re-orged heights found in range."
@@ -276,7 +331,10 @@ for i in "${!CLUSTER_LOWS[@]}"; do
   fi
 done
 if [[ ${#KEPT_LOWS[@]} -eq 0 ]]; then
-  if [[ "$QQ_QUIET" == "true" ]]; then
+  if [[ "$JSON_OUT" == "true" ]]; then
+    printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[]}\n' \
+      "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT"
+  elif [[ "$QQ_QUIET" == "true" ]]; then
     echo "Found 0 reorgs of at least $MIN_DEPTH blocks in the specified range."
   elif [[ $MIN_DEPTH -eq 1 ]]; then
     echo "No re-orged heights found in range."
@@ -436,6 +494,33 @@ fmt_ts_suffix() {
 
 # Report.
 N_CLUSTERS=${#CLUSTER_LOWS[@]}
+
+# JSON output: emit a single object and exit. No prose, no per-block detail.
+# Schema matches what the reorg_monitor's local poller expects.
+if [[ "$JSON_OUT" == "true" ]]; then
+  # Resolve a timestamp for each cluster's low+high in unix-seconds form.
+  # Resolution is the same forward-walk used by the prose report, so the
+  # JSON values represent the same anchor points.
+  json_reorgs=""
+  for i in "${!CLUSTER_LOWS[@]}"; do
+    low="${CLUSTER_LOWS[$i]}"
+    high="${CLUSTER_HIGHS[$i]}"
+    depth=$((high - low + 1))
+    ts_low=$(get_block_timestamp "$low")
+    if [[ "$low" -eq "$high" ]]; then
+      ts_high="$ts_low"
+    else
+      ts_high=$(get_block_timestamp "$high")
+    fi
+    [[ -z "$ts_low" ]] && ts_low="null"
+    [[ -z "$ts_high" ]] && ts_high="null"
+    if [[ -n "$json_reorgs" ]]; then json_reorgs+=","; fi
+    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high}"
+  done
+  printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[%s]}\n' \
+    "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT" "$json_reorgs"
+  exit 0
+fi
 
 # Super-quiet: just the one-line summary, no further output of any kind.
 if [[ "$QQ_QUIET" == "true" ]]; then
