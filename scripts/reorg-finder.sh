@@ -49,14 +49,23 @@
 #                  the full-node RPC (default, rpc) or from the local DB via
 #                  `SELECT MAX(height) FROM full_blocks` (db). `db` avoids
 #                  any RPC dependency — useful for monitor-driven use.
-#   --compare-proofs  For each reorg, compare the proof-of-space at the
-#                  cluster's top height between the canonical and orphaned
-#                  blocks. Appends " — Proofs match" / " — Proofs don't
-#                  match" to each per-reorg summary line, adds a totals
-#                  line under "Found N reorgs:", and (when -q is not set)
-#                  shows a per-cluster verdict in the per-block-detail
-#                  section. Requires chia-blockchain Python package.
-#                  Default: disabled.
+#   --compare-proofs  For each reorg, compare the proof-of-space CHALLENGE
+#                  and PLOT_PUBLIC_KEY at the cluster's top height between
+#                  the canonical and orphaned blocks. Appends
+#                  " — challenge: same|differs, plot_pk: same|differs" to
+#                  each per-reorg summary line, adds a totals line under
+#                  "Found N reorgs:" reporting how many reorgs have
+#                  matching challenges and matching plot keys, and (when
+#                  -q is not set) shows a per-cluster verdict in the
+#                  per-block-detail section. Requires chia-blockchain
+#                  Python package. Default: disabled.
+#
+#                  Same challenge + different plot_pk is the typical reorg
+#                  signature (two farmers won the same slot). Same
+#                  plot_pk would be anomalous (one farmer self-conflicting).
+#                  Same challenge with the same plot_pk is even more so —
+#                  it means the same farmer produced two different blocks
+#                  for the same slot.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -661,57 +670,64 @@ _pos_field() {
     '$1 == h && $2 == hh { print $f; exit }' <<< "$POS_DATA"
 }
 
-# Compare proofs at the cluster top. Echoes "match", "no-match", or
+# Compare one PoS field (by TSV column index) between the canonical and
+# orphaned blocks at the cluster top. Echoes "same", "differs", or
 # "unavailable" (when PoS data couldn't be loaded for either side).
-_proof_compare_status() {
-  local high=$1 canonical_hash orphan_hash canonical_sha orphan_sha
+# Fields: 4=challenge, 5=plot_pk (TSV columns from _decode_pos.py).
+_compare_field_at_top() {
+  local high=$1 field_idx=$2 canonical_hash orphan_hash canonical_val orphan_val
   canonical_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
     "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
   orphan_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
     "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
-  canonical_sha=$(_pos_field "$high" "$canonical_hash" 8)
-  orphan_sha=$(_pos_field "$high" "$orphan_hash" 8)
-  if [[ -z "$canonical_sha" || -z "$orphan_sha" ]]; then
+  canonical_val=$(_pos_field "$high" "$canonical_hash" "$field_idx")
+  orphan_val=$(_pos_field "$high" "$orphan_hash" "$field_idx")
+  if [[ -z "$canonical_val" || -z "$orphan_val" ]]; then
     echo "unavailable"
-  elif [[ "$canonical_sha" == "$orphan_sha" ]]; then
-    echo "match"
+  elif [[ "$canonical_val" == "$orphan_val" ]]; then
+    echo "same"
   else
-    echo "no-match"
+    echo "differs"
   fi
 }
 
-# Render the human verdict for a status. Two callers: per-reorg summary
-# suffix and the in-detail "Proof comparison:" line.
-_proof_verdict_text() {
-  case "$1" in
-    match)       echo "Proofs match" ;;
-    no-match)    echo "Proofs don't match" ;;
-    unavailable) echo "Proofs unavailable" ;;
-  esac
-}
-
 # Pre-compute per-cluster comparison statuses (used for both the per-reorg
-# suffix and the totals line). Indexed by cluster index.
-declare -a CLUSTER_PROOF_STATUS=()
-PROOF_MATCH_COUNT=0
-PROOF_NOMATCH_COUNT=0
+# suffix and the totals line). Two parallel arrays — one per compared field.
+declare -a CLUSTER_CHALLENGE_STATUS=()
+declare -a CLUSTER_PLOTPK_STATUS=()
+CHALLENGE_SAME_COUNT=0
+CHALLENGE_DIFFER_COUNT=0
+PLOTPK_SAME_COUNT=0
+PLOTPK_DIFFER_COUNT=0
 if [[ "$COMPARE_PROOFS" == "true" && "$POS_AVAILABLE" == "true" ]]; then
   for i in "${!CLUSTER_HIGHS[@]}"; do
-    s=$(_proof_compare_status "${CLUSTER_HIGHS[$i]}")
-    CLUSTER_PROOF_STATUS[$i]="$s"
-    case "$s" in
-      match)    PROOF_MATCH_COUNT=$((PROOF_MATCH_COUNT + 1)) ;;
-      no-match) PROOF_NOMATCH_COUNT=$((PROOF_NOMATCH_COUNT + 1)) ;;
+    cs=$(_compare_field_at_top "${CLUSTER_HIGHS[$i]}" 4)  # challenge
+    ps=$(_compare_field_at_top "${CLUSTER_HIGHS[$i]}" 5)  # plot_pk
+    CLUSTER_CHALLENGE_STATUS[$i]="$cs"
+    CLUSTER_PLOTPK_STATUS[$i]="$ps"
+    case "$cs" in
+      same)    CHALLENGE_SAME_COUNT=$((CHALLENGE_SAME_COUNT + 1)) ;;
+      differs) CHALLENGE_DIFFER_COUNT=$((CHALLENGE_DIFFER_COUNT + 1)) ;;
+    esac
+    case "$ps" in
+      same)    PLOTPK_SAME_COUNT=$((PLOTPK_SAME_COUNT + 1)) ;;
+      differs) PLOTPK_DIFFER_COUNT=$((PLOTPK_DIFFER_COUNT + 1)) ;;
     esac
   done
 fi
 
-# Helper: append " — <verdict>" suffix to a per-reorg summary line when
-# --compare-proofs is set. Echoes empty string otherwise.
+# Render the per-reorg suffix shown next to summary lines when
+# --compare-proofs is set. Always shows both dimensions for consistency,
+# or a single "PoS data unavailable" note when either side is missing.
 _proof_suffix() {
-  local i=$1
-  if [[ "$COMPARE_PROOFS" == "true" && -n "${CLUSTER_PROOF_STATUS[$i]:-}" ]]; then
-    echo " — $(_proof_verdict_text "${CLUSTER_PROOF_STATUS[$i]}")"
+  local i=$1 cs ps
+  if [[ "$COMPARE_PROOFS" != "true" ]]; then return; fi
+  cs="${CLUSTER_CHALLENGE_STATUS[$i]:-unavailable}"
+  ps="${CLUSTER_PLOTPK_STATUS[$i]:-unavailable}"
+  if [[ "$cs" == "unavailable" || "$ps" == "unavailable" ]]; then
+    echo " — PoS data unavailable"
+  else
+    echo " — challenge: $cs, plot_pk: $ps"
   fi
 }
 
@@ -732,10 +748,13 @@ fi
 # Shown when --compare-proofs is set; -qq already exited before this point.
 if [[ "$COMPARE_PROOFS" == "true" ]]; then
   if [[ "$POS_AVAILABLE" == "true" ]]; then
-    PROOF_UNAVAIL_COUNT=$((N_CLUSTERS - PROOF_MATCH_COUNT - PROOF_NOMATCH_COUNT))
-    extra=""
-    [[ $PROOF_UNAVAIL_COUNT -gt 0 ]] && extra=" ($PROOF_UNAVAIL_COUNT unavailable)"
-    echo "Of those reorgs, $PROOF_MATCH_COUNT have matching proofs and $PROOF_NOMATCH_COUNT have differing proofs.$extra"
+    challenge_unavail=$((N_CLUSTERS - CHALLENGE_SAME_COUNT - CHALLENGE_DIFFER_COUNT))
+    plotpk_unavail=$((N_CLUSTERS - PLOTPK_SAME_COUNT - PLOTPK_DIFFER_COUNT))
+    challenge_extra=""
+    plotpk_extra=""
+    [[ $challenge_unavail -gt 0 ]] && challenge_extra=" ($challenge_unavail unavailable)"
+    [[ $plotpk_unavail -gt 0 ]] && plotpk_extra=" ($plotpk_unavail unavailable)"
+    echo "Of those reorgs, $CHALLENGE_SAME_COUNT have matching challenges$challenge_extra and $PLOTPK_SAME_COUNT have matching plot keys$plotpk_extra."
   else
     echo "Of those reorgs, proof comparison is unavailable."
     echo "  Tried python: $CHIA_PYTHON_BIN"
@@ -768,21 +787,16 @@ SQL
     # Iterate in the same order as the table above.
     while IFS=$'\t' read -r _h _hh _imc; do
       [[ -z "$_h" ]] && continue
-      _k=$(_pos_field "$_h" "$_hh" 3)
       _ch=$(_pos_field "$_h" "$_hh" 4)
       _ppk=$(_pos_field "$_h" "$_hh" 5)
-      _pv=$(_pos_field "$_h" "$_hh" 6)
-      _pt=$(_pos_field "$_h" "$_hh" 7)
       role="canonical"; [[ "$_imc" == "0" ]] && role="orphaned"
-      if [[ -z "$_k" ]]; then
+      if [[ -z "$_ch" ]]; then
         printf "  height=%s %s (%s):  PoS data unavailable\n" "$_h" "${_hh:0:8}…${_hh: -4}" "$role"
       else
-        printf "  height=%s %s (%s):  k=%s  challenge=%s…%s  plot_pk=%s…%s  %s=%s…%s\n" \
+        printf "  height=%s %s (%s):  challenge=%s…%s  plot_pk=%s…%s\n" \
           "$_h" "${_hh:0:8}…${_hh: -4}" "$role" \
-          "$_k" \
           "${_ch:0:8}" "${_ch: -4}" \
-          "${_ppk:0:8}" "${_ppk: -4}" \
-          "$_pt" "${_pv:0:8}" "${_pv: -4}"
+          "${_ppk:0:8}" "${_ppk: -4}"
       fi
     done < <(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
       "SELECT height, lower(hex(header_hash)), in_main_chain FROM full_blocks WHERE height IN ($HEIGHT_LIST) ORDER BY height, in_main_chain DESC;")
@@ -791,10 +805,15 @@ SQL
       echo
       echo "Proof comparison at each cluster's top height:"
       for i in "${!CLUSTER_HIGHS[@]}"; do
-        s="${CLUSTER_PROOF_STATUS[$i]:-unavailable}"
-        printf "  heights %s..%s (top=%s):  %s\n" \
-          "${CLUSTER_LOWS[$i]}" "${CLUSTER_HIGHS[$i]}" "${CLUSTER_HIGHS[$i]}" \
-          "$(_proof_verdict_text "$s")"
+        cs="${CLUSTER_CHALLENGE_STATUS[$i]:-unavailable}"
+        ps="${CLUSTER_PLOTPK_STATUS[$i]:-unavailable}"
+        if [[ "$cs" == "unavailable" || "$ps" == "unavailable" ]]; then
+          printf "  heights %s..%s (top=%s):  PoS data unavailable\n" \
+            "${CLUSTER_LOWS[$i]}" "${CLUSTER_HIGHS[$i]}" "${CLUSTER_HIGHS[$i]}"
+        else
+          printf "  heights %s..%s (top=%s):  challenge: %s, plot_pk: %s\n" \
+            "${CLUSTER_LOWS[$i]}" "${CLUSTER_HIGHS[$i]}" "${CLUSTER_HIGHS[$i]}" "$cs" "$ps"
+        fi
       done
     fi
   elif [[ "$NEED_POS" == "true" ]]; then
