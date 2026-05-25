@@ -408,16 +408,23 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
 
 // ----- helpers below ------------------------------------------------------
 
-function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): SourceEvent {
-  // Each ReorgEvent represents one changed height; depth/max_depth are the
-  // cluster size as computed at detection time. For coinset, low = high =
-  // the changed height (the cluster is decomposed into per-height events by
-  // the monitor — we treat each event as a single-height "mini-cluster" from
-  // the dual-source perspective and let the match logic do the overlap check).
+export function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): SourceEvent {
+  // `low` is the actual observed changed height. `high` is widened by the
+  // "unobserved upward extent" (max_depth - depth) so the SourceEvent
+  // represents the full range of heights that *might* have been part of the
+  // cluster — Coinset can only directly observe heights it polled before the
+  // chain advanced past them. Without this widening, a Coinset event at
+  // height H with depth=1, max_depth=4 (chain advanced 3 blocks past
+  // observed peak during the reorg) would only match a local detection at
+  // exactly H, missing local detections at H+1..H+3 that are part of the
+  // same logical reorg.
+  //
+  // When depth == max_depth (chain didn't advance into unobserved territory)
+  // the widening is zero and behavior is unchanged.
   return {
     source,
     low: evt.height,
-    high: evt.height,
+    high: evt.height + (evt.max_depth - evt.depth),
     depth: evt.depth,
     max_depth: evt.max_depth,
     detected_at_iso: evt.detected_at,
@@ -549,9 +556,13 @@ function dispatchDualOutcome(
   });
 }
 
-function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
+export function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
+  // For Coinset events, `high` may be a widened upper bound (see
+  // reorgEventToSourceEvent) — use `low` which is the actual observed
+  // changed height. For local events, `high` is the top of the exact
+  // observed cluster.
   return {
-    height: s.high,
+    height: s.source === 'coinset' ? s.low : s.high,
     old_header_hash:
       s.source === 'local'
         ? '(unavailable — local DB detection)'
