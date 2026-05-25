@@ -36,10 +36,39 @@ except ImportError:
         print("error: neither `zstd` nor `zstandard` python package is installed", file=sys.stderr)
         sys.exit(2)
 
-try:
-    from chia.types.full_block import FullBlock
-except ImportError:
-    print("error: chia-blockchain not importable (pip install chia-blockchain in the active venv)", file=sys.stderr)
+# Try a few candidate import paths for FullBlock — chia-blockchain has
+# reorganized internals across versions. Surface the first failure's actual
+# message so the user (or maintainer) can fix it instead of guessing.
+FullBlock = None
+_chia_import_error = None
+for _modpath in ("chia.types.full_block", "chia.consensus.full_block"):
+    try:
+        _mod = __import__(_modpath, fromlist=["FullBlock"])
+        FullBlock = getattr(_mod, "FullBlock", None)
+        if FullBlock is not None:
+            break
+    except Exception as _e:  # ImportError is most common; protect against runtime errors too.
+        if _chia_import_error is None:
+            _chia_import_error = f"{_modpath}: {type(_e).__name__}: {_e}"
+        continue
+
+if FullBlock is None:
+    # Last-ditch: try the Rust bindings, which expose FullBlock in newer chia.
+    try:
+        from chia_rs import FullBlock  # type: ignore  # noqa: F401
+    except Exception as _e:
+        if _chia_import_error is None:
+            _chia_import_error = f"chia_rs: {type(_e).__name__}: {_e}"
+
+if FullBlock is None:
+    print(
+        f"error: FullBlock not importable: {_chia_import_error or 'unknown'}",
+        file=sys.stderr,
+    )
+    print(
+        "       (ensure CHIA_PYTHON points at a venv with chia-blockchain installed)",
+        file=sys.stderr,
+    )
     sys.exit(3)
 
 

@@ -642,10 +642,11 @@ if [[ "$NEED_POS" == "true" && -r "$POS_HELPER" ]]; then
     if [[ -n "$POS_DATA" ]]; then
       POS_AVAILABLE="true"
     else
-      # Surface the helper's stderr (first line) and the python path tried,
-      # so the user can fix it quickly (usually: set CHIA_PYTHON to the
-      # right venv).
-      POS_ERROR=$(head -n 1 "$pos_stderr" 2>/dev/null || true)
+      # Surface the helper's actual error message so the user can diagnose
+      # (chia not installed, version mismatch, transitive dep failure, etc.).
+      # Filter to lines starting with "error:" if any exist, otherwise take
+      # everything — this skips spurious warnings from chia's import chain.
+      POS_ERROR=$(grep '^error:' "$pos_stderr" 2>/dev/null || cat "$pos_stderr" 2>/dev/null || true)
       [[ -z "$POS_ERROR" ]] && POS_ERROR="helper exited with no output"
     fi
     rm -f "$pos_stderr"
@@ -738,9 +739,9 @@ if [[ "$COMPARE_PROOFS" == "true" ]]; then
   else
     echo "Of those reorgs, proof comparison is unavailable."
     echo "  Tried python: $CHIA_PYTHON_BIN"
-    echo "  Error: $POS_ERROR"
-    echo "  Hint: set CHIA_PYTHON to your chia venv's python, e.g.:"
-    echo "        CHIA_PYTHON=~/chia-blockchain/venv/bin/python ./reorg-finder.sh ..."
+    echo "  Helper output:"
+    while IFS= read -r _line; do echo "    $_line"; done <<< "$POS_ERROR"
+    echo "  Hint: set CHIA_PYTHON to a venv with chia-blockchain importable."
   fi
 fi
 
@@ -803,9 +804,9 @@ SQL
     echo
     echo "Proof of Space: unavailable."
     echo "  Tried python: $CHIA_PYTHON_BIN"
-    echo "  Error: $POS_ERROR"
-    echo "  Hint: set CHIA_PYTHON to your chia venv's python, e.g.:"
-    echo "        CHIA_PYTHON=~/chia-blockchain/venv/bin/python ./reorg-finder.sh ..."
+    echo "  Helper output:"
+    while IFS= read -r _line; do echo "    $_line"; done <<< "$POS_ERROR"
+    echo "  Hint: set CHIA_PYTHON to a venv with chia-blockchain importable."
   fi
 fi
 }
