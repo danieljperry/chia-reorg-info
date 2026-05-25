@@ -166,3 +166,96 @@ describe('local-poller _pollLocalOnce', () => {
     ]);
   });
 });
+
+const { validateLocalScanResult } = await import('../src/monitor/local-poller.js');
+
+describe('validateLocalScanResult', () => {
+  const valid = {
+    network: 'mainnet',
+    start_height: 100,
+    end_height: 110,
+    scanned_at_unix: 1_700_000_000,
+    peak_at_scan: 110,
+    reorgs: [{ low: 105, high: 105, depth: 1, ts_low_unix: 1, ts_high_unix: 1 }],
+  };
+
+  it('accepts a well-formed payload', () => {
+    expect(validateLocalScanResult(valid)).not.toBeNull();
+  });
+
+  it('accepts null timestamps on individual reorgs', () => {
+    const v = { ...valid, reorgs: [{ low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null }] };
+    expect(validateLocalScanResult(v)).not.toBeNull();
+  });
+
+  it.each<{ label: string; raw: unknown }>([
+    { label: 'null root', raw: null },
+    { label: 'string root', raw: 'string' },
+    { label: 'number root', raw: 42 },
+    { label: 'array root', raw: [] },
+  ])('rejects non-object root: $label', ({ raw }) => {
+    expect(validateLocalScanResult(raw)).toBeNull();
+  });
+
+  it('rejects missing or wrongly-typed scalar fields', () => {
+    expect(validateLocalScanResult({ ...valid, network: 123 })).toBeNull();
+    expect(validateLocalScanResult({ ...valid, peak_at_scan: -1 })).toBeNull();
+    expect(validateLocalScanResult({ ...valid, peak_at_scan: 3.14 })).toBeNull();
+    expect(validateLocalScanResult({ ...valid, scanned_at_unix: 'now' })).toBeNull();
+  });
+
+  it('rejects a non-array reorgs field', () => {
+    expect(validateLocalScanResult({ ...valid, reorgs: 'oops' })).toBeNull();
+  });
+
+  it('rejects a reorg with non-integer fields (the type-confusion attack)', () => {
+    const bad = {
+      ...valid,
+      reorgs: [{ low: '105', high: 105, depth: 1, ts_low_unix: 1, ts_high_unix: 1 }],
+    };
+    expect(validateLocalScanResult(bad)).toBeNull();
+  });
+
+  it('rejects a reorg with negative height', () => {
+    const bad = {
+      ...valid,
+      reorgs: [{ low: -1, high: 1, depth: 1, ts_low_unix: 1, ts_high_unix: 1 }],
+    };
+    expect(validateLocalScanResult(bad)).toBeNull();
+  });
+
+  it('rejects a non-integer ts_low_unix (non-null, non-int)', () => {
+    const bad = {
+      ...valid,
+      reorgs: [{ low: 1, high: 1, depth: 1, ts_low_unix: 'evil', ts_high_unix: 1 }],
+    };
+    expect(validateLocalScanResult(bad)).toBeNull();
+  });
+});
+
+describe('local-poller _pollLocalOnce — schema enforcement', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    _resetLocalStateForTests();
+  });
+
+  it('does not call on_reorg / on_peak when JSON parses but fails schema', async () => {
+    spawnMock.mockReturnValueOnce(
+      fakeChild({
+        // Missing required peak_at_scan, plus a malformed reorg entry.
+        stdout: JSON.stringify({
+          network: 'mainnet',
+          start_height: 100,
+          end_height: 110,
+          scanned_at_unix: 1,
+          reorgs: [{ low: 'not-a-number', high: 105, depth: 1 }],
+        }),
+      })
+    );
+    const onReorg = vi.fn();
+    const onPeak = vi.fn();
+    await _pollLocalOnce({ ...baseOpts, on_reorg: onReorg, on_peak: onPeak });
+    expect(onReorg).not.toHaveBeenCalled();
+    expect(onPeak).not.toHaveBeenCalled();
+  });
+});

@@ -58,6 +58,16 @@ export function matches(a: SourceEvent, b: SourceEvent): boolean {
 
 export type DualSourceMode = 'coinset' | 'local' | 'both';
 
+/**
+ * Upper bound on the pending-events buffer. In `both` mode events stay
+ * buffered until BOTH sources' peaks have advanced past `high + 2`, so a
+ * prolonged one-sided outage (e.g. Coinset down for hours while local keeps
+ * polling) could otherwise accumulate events without bound. At normal
+ * mainnet reorg rates (single digits per day) this cap is well above any
+ * realistic backlog; we drop oldest and log if it ever fills.
+ */
+export const PENDING_BUFFER_CAP = 10_000;
+
 type State = {
   mode: DualSourceMode;
   pending: SourceEvent[];
@@ -91,6 +101,15 @@ export function createDualSource(mode: DualSourceMode, dispatch: DispatchHook) {
       depth: evt.depth === evt.max_depth ? `${evt.depth}` : `${evt.depth}-${evt.max_depth}`,
     });
     state.pending.push(evt);
+    if (state.pending.length > PENDING_BUFFER_CAP) {
+      const dropped = state.pending.shift()!;
+      log('warn', 'Dual-source pending buffer at cap; dropped oldest event', {
+        cap: PENDING_BUFFER_CAP,
+        dropped_source: dropped.source,
+        dropped_low: dropped.low,
+        dropped_high: dropped.high,
+      });
+    }
   }
 
   /**

@@ -385,6 +385,15 @@ except Exception:
     print("")
 ' 2>/dev/null || true)
   [[ "$ts" == "None" ]] && ts=""
+  # Reject anything that isn't a non-negative integer. The result is later
+  # interpolated into a `python3 -c` template (format_local_time) and emitted
+  # unquoted into JSON (--json mode), so an attacker-controlled non-numeric
+  # value would be RCE in one path and JSON corruption in the other. The
+  # upstream RPCs (localhost full node via `curl -sk`, plus coinset fallback)
+  # are not fully trusted for the purposes of code-eval, so validate here.
+  if [[ -n "$ts" ]] && ! [[ "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
   printf '%s' "$ts"
 }
 

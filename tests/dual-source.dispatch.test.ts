@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createDualSource,
+  PENDING_BUFFER_CAP,
   type DispatchOutcome,
   type SourceEvent,
 } from '../src/monitor/dual-source.js';
@@ -210,5 +211,26 @@ describe('dual-source dispatch outcomes', () => {
     c.noteReorg(coinsetEvt(100, 100, 1));
     await c.notePeak('coinset', 102);
     expect(fn).toHaveBeenCalledOnce();
+  });
+
+  it('pending buffer is bounded; oldest event is dropped at the cap', () => {
+    const dispatched: DispatchOutcome[] = [];
+    const c = createDualSource('both', (o) => {
+      dispatched.push(o);
+    });
+    // Fill the buffer to capacity. No peaks reported, so nothing releases.
+    for (let i = 0; i < PENDING_BUFFER_CAP; i++) {
+      c.noteReorg(coinsetEvt(1_000_000 + i, 1_000_000 + i, 1));
+    }
+    expect(c._state().pending).toHaveLength(PENDING_BUFFER_CAP);
+    expect(c._state().pending[0]!.low).toBe(1_000_000);
+
+    // One more push should drop the oldest, keep length at cap, and the head
+    // should now be the second-oldest.
+    c.noteReorg(coinsetEvt(2_000_000, 2_000_000, 1));
+    expect(c._state().pending).toHaveLength(PENDING_BUFFER_CAP);
+    expect(c._state().pending[0]!.low).toBe(1_000_001);
+    expect(c._state().pending[PENDING_BUFFER_CAP - 1]!.low).toBe(2_000_000);
+    expect(dispatched).toHaveLength(0);
   });
 });

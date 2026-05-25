@@ -58,6 +58,56 @@ const localState: State = {
   generation: 0,
 };
 
+function isNonNegInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0;
+}
+
+/**
+ * Validate the bash script's JSON output against the LocalScanResult shape.
+ * Returns the typed value on success, null on any shape mismatch.
+ *
+ * We don't trust the script's output blindly because (a) the script itself
+ * pulls block timestamps from RPCs that aren't fully trusted (see the
+ * timestamp-validation comment in scripts/reorg-finder.sh) and (b) defending
+ * against type confusion here is cheap and means downstream consumers
+ * (dual-source, dispatch) can rely on the types.
+ */
+export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.network !== 'string') return null;
+  if (!isNonNegInt(r.start_height)) return null;
+  if (!isNonNegInt(r.end_height)) return null;
+  if (!isNonNegInt(r.scanned_at_unix)) return null;
+  if (!isNonNegInt(r.peak_at_scan)) return null;
+  if (!Array.isArray(r.reorgs)) return null;
+  const reorgs: LocalReorg[] = [];
+  for (const item of r.reorgs) {
+    if (typeof item !== 'object' || item === null) return null;
+    const e = item as Record<string, unknown>;
+    if (!isNonNegInt(e.low)) return null;
+    if (!isNonNegInt(e.high)) return null;
+    if (!isNonNegInt(e.depth)) return null;
+    if (e.ts_low_unix !== null && !isNonNegInt(e.ts_low_unix)) return null;
+    if (e.ts_high_unix !== null && !isNonNegInt(e.ts_high_unix)) return null;
+    reorgs.push({
+      low: e.low,
+      high: e.high,
+      depth: e.depth,
+      ts_low_unix: e.ts_low_unix,
+      ts_high_unix: e.ts_high_unix,
+    });
+  }
+  return {
+    network: r.network,
+    start_height: r.start_height,
+    end_height: r.end_height,
+    scanned_at_unix: r.scanned_at_unix,
+    peak_at_scan: r.peak_at_scan,
+    reorgs,
+  };
+}
+
 /** Run the script once. Exported for testability; the loop calls it directly. */
 export async function _pollLocalOnce(opts: LocalPollerOpts): Promise<void> {
   const generation = localState.generation;
@@ -106,10 +156,17 @@ export async function _pollLocalOnce(opts: LocalPollerOpts): Promise<void> {
 
   let parsed: LocalScanResult;
   try {
-    // JSON.parse returns `any` by design; we trust the script's schema and
-    // let downstream code fail loudly if the shape is unexpected.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    parsed = JSON.parse(stdout);
+    const raw = JSON.parse(stdout);
+    const validated = validateLocalScanResult(raw);
+    if (validated === null) {
+      localState.last_error = `local poll output failed schema validation`;
+      log('error', 'Local poll output failed schema validation', {
+        stdout_head: stdout.slice(0, 200),
+      });
+      return;
+    }
+    parsed = validated;
   } catch (err) {
     localState.last_error = `local poll output unparseable: ${safeMessage(err)}`;
     log('error', 'Local poll output unparseable', {
