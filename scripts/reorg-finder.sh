@@ -939,12 +939,12 @@ if [[ "$AGGREGATE_STATS" == "true" ]]; then
   ' <(printf '%s' "$BLOCK_META") <(printf '%s' "$POS_DATA"))
 
   # Median + mean over an integer list on stdin. Prints "n/a" when empty.
+  # Sorts externally (mawk and BSD awk lack asort; only gawk has it).
   _stats() {
-    awk '
+    sort -n | awk '
       { a[++n] = $1 + 0; sum += $1 }
       END {
         if (n == 0) { print "n/a"; exit }
-        asort(a)
         median = (n % 2 == 1) ? a[int(n/2)+1] : int((a[n/2] + a[n/2+1]) / 2)
         printf "median %d, mean %d (n=%d)", median, int(sum/n), n
       }'
