@@ -65,13 +65,15 @@ const state = {
   alertedReorgs: new Set<string>(), // `${height}:${new_hash}` pairs already alerted on this session
   timer: null as NodeJS.Timeout | null,
   generation: 0, // incremented on start/stop; in-flight polls bail if it changes mid-execution
-  // Optional hooks for dual-source mode. When set, each newly-detected reorg
-  // is also routed through onReorg, and onPeak fires after each successful
-  // poll. These do NOT replace the existing per-recipient inline dispatch —
-  // they run in addition to it. For dual-source mode the CLI passes an empty
-  // alert_recipients (so inline dispatch is a no-op) and routes through the
-  // dual-source coordinator instead.
-  onReorg: null as ((event: ReorgEvent) => void) | null,
+  // Optional hooks for dual-source mode. onReorgBatch fires once per poll
+  // cycle with ALL newly-detected reorgs from that poll (so the CLI can
+  // consolidate consecutive heights into one cluster-level SourceEvent
+  // instead of emitting N per-height events for one logical reorg). onPeak
+  // fires after each successful poll. These do NOT replace the existing
+  // per-recipient inline dispatch — they run in addition to it. For
+  // dual-source mode the CLI passes an empty alert_recipients (so inline
+  // dispatch is a no-op) and routes through the dual-source coordinator.
+  onReorgBatch: null as ((events: ReorgEvent[]) => void) | null,
   onPeak: null as ((peak: number) => void) | null,
 };
 
@@ -237,11 +239,13 @@ export async function _pollOnce(): Promise<void> {
       return true;
     });
 
-    // Dual-source hook: forward each new reorg to the coordinator. The inline
-    // per-recipient dispatch below still runs, but in dual-source mode the CLI
-    // passes alert_recipients=[] so it's a no-op.
-    if (state.onReorg !== null) {
-      for (const r of newReorgsForAlert) state.onReorg(r);
+    // Dual-source hook: forward this poll's batch to the coordinator. The
+    // inline per-recipient dispatch below still runs, but in dual-source mode
+    // the CLI passes alert_recipients=[] so it's a no-op. We hand off the
+    // batch as a unit (not per-event) so the CLI can consolidate consecutive
+    // heights into a single cluster-level SourceEvent.
+    if (state.onReorgBatch !== null && newReorgsForAlert.length > 0) {
+      state.onReorgBatch(newReorgsForAlert);
     }
 
     // Send one batched email per recipient containing all eligible reorgs from this poll.
@@ -310,8 +314,10 @@ export function startMonitor(opts: {
   lookback_blocks: number;
   network: Network;
   alert_recipients?: AlertRecipient[];
-  /** Dual-source hook: called once per newly-detected reorg. */
-  on_reorg?: (event: ReorgEvent) => void;
+  /** Dual-source hook: called once per poll with all newly-detected reorgs
+   *  in that poll (so the caller can consolidate consecutive heights into
+   *  one cluster). Not called when the batch is empty. */
+  on_reorg_batch?: (events: ReorgEvent[]) => void;
   /** Dual-source hook: called after each successful poll completes. */
   on_peak?: (peak: number) => void;
 }): void {
@@ -322,7 +328,7 @@ export function startMonitor(opts: {
   state.poll_interval_seconds = opts.poll_interval_seconds;
   state.lookback_blocks = opts.lookback_blocks;
   state.alert_recipients = opts.alert_recipients ?? [];
-  state.onReorg = opts.on_reorg ?? null;
+  state.onReorgBatch = opts.on_reorg_batch ?? null;
   state.onPeak = opts.on_peak ?? null;
   state.started_at = new Date().toISOString();
   state.poll_count = 0;
@@ -352,7 +358,7 @@ export function stopMonitor(): void {
     state.timer = null;
   }
   state.active = false;
-  state.onReorg = null;
+  state.onReorgBatch = null;
   state.onPeak = null;
   if (wasActive) {
     log('info', 'Monitor stopped', {

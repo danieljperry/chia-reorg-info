@@ -321,14 +321,22 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
     });
 
     // Coinset poller: alert_recipients is empty so inline dispatch is a no-op;
-    // hooks forward each detection + peak to the coordinator.
+    // hooks forward each poll's batch + peak to the coordinator. The batch
+    // hook is critical: the underlying monitor emits one ReorgEvent per
+    // changed height, but the dual-source coordinator wants one SourceEvent
+    // per logical reorg (cluster). Without consolidation here, a 3-height
+    // observed cluster would race against the single local cluster event and
+    // produce 1 matched + 2 coinset-only outcomes (i.e. 3 emails for 1 reorg).
     startMonitor({
       network: args.network,
       poll_interval_seconds: args.pollIntervalSeconds,
       lookback_blocks: args.lookbackBlocks,
       alert_recipients: [],
-      on_reorg: (evt) =>
-        coordinator.noteReorg(reorgEventToSourceEvent(evt, 'coinset')),
+      on_reorg_batch: (events) => {
+        for (const cluster of consolidateCoinsetBatch(events)) {
+          coordinator.noteReorg(cluster);
+        }
+      },
       on_peak: (peak) => {
         void coordinator.notePeak('coinset', peak);
       },
@@ -407,6 +415,45 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
 }
 
 // ----- helpers below ------------------------------------------------------
+
+/**
+ * Group a poll's worth of per-height Coinset ReorgEvents into one
+ * cluster-level SourceEvent per contiguous run of heights. Within a cluster,
+ * all events share the same depth + max_depth (computed once by the monitor),
+ * so we use either end's values; the cluster's high is widened by
+ * (max_depth - depth) to encode the potentially-affected upper extent
+ * (see reorgEventToSourceEvent for the rationale).
+ *
+ * Empty input → empty output. A batch can contain multiple disjoint
+ * clusters (e.g. two unrelated reorgs in the same poll); each becomes its
+ * own SourceEvent.
+ */
+export function consolidateCoinsetBatch(events: ReorgEvent[]): SourceEvent[] {
+  if (events.length === 0) return [];
+  const sorted = [...events].sort((a, b) => a.height - b.height);
+  const clusters: SourceEvent[] = [];
+  let clusterStart = 0;
+  for (let i = 1; i <= sorted.length; i++) {
+    const isBreak =
+      i === sorted.length || sorted[i]!.height !== sorted[i - 1]!.height + 1;
+    if (isBreak) {
+      const first = sorted[clusterStart]!;
+      const last = sorted[i - 1]!;
+      clusters.push({
+        source: 'coinset',
+        low: first.height,
+        high: last.height + (last.max_depth - last.depth),
+        depth: first.depth,
+        max_depth: first.max_depth,
+        detected_at_iso: first.detected_at,
+        ts_low_unix: null,
+        ts_high_unix: null,
+      });
+      clusterStart = i;
+    }
+  }
+  return clusters;
+}
 
 export function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): SourceEvent {
   // `low` is the actual observed changed height. `high` is widened by the

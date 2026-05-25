@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  consolidateCoinsetBatch,
   reorgEventToSourceEvent,
   synthesizeReorgEventFromSource,
 } from '../src/cli/reorg-monitor.js';
-import { matches, type SourceEvent } from '../src/monitor/dual-source.js';
+import { createDualSource, matches, type DispatchOutcome, type SourceEvent } from '../src/monitor/dual-source.js';
 import type { ReorgEvent } from '../src/monitor/reorg-monitor.js';
 
 // Build a ReorgEvent as it would arrive from the Coinset poller. The
@@ -107,6 +108,88 @@ describe('reorgEventToSourceEvent — height widening for Coinset uncertainty', 
     );
     const local = localSourceEvent(101, 101, 1);
     expect(matches(cs, local)).toBe(false);
+  });
+});
+
+describe('consolidateCoinsetBatch — group per-height events into cluster SourceEvents', () => {
+  it('empty input → empty output', () => {
+    expect(consolidateCoinsetBatch([])).toEqual([]);
+  });
+
+  it('single event → single SourceEvent (with widening)', () => {
+    const evts = [coinsetReorgEvent({ height: 8773500, depth: 1, max_depth: 4 })];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      source: 'coinset',
+      low: 8773500,
+      high: 8773503, // widened by max_depth - depth = 3
+      depth: 1,
+      max_depth: 4,
+    });
+  });
+
+  it('3 consecutive heights with shared depth=3, max_depth=3 → 1 SourceEvent spanning the cluster', () => {
+    const evts = [
+      coinsetReorgEvent({ height: 100, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 101, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 102, depth: 3, max_depth: 3 }),
+    ];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ low: 100, high: 102, depth: 3, max_depth: 3 });
+  });
+
+  it('3 consecutive heights with shared depth=3, max_depth=5 → cluster widened upward by 2', () => {
+    const evts = [
+      coinsetReorgEvent({ height: 100, depth: 3, max_depth: 5 }),
+      coinsetReorgEvent({ height: 101, depth: 3, max_depth: 5 }),
+      coinsetReorgEvent({ height: 102, depth: 3, max_depth: 5 }),
+    ];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ low: 100, high: 104, depth: 3, max_depth: 5 });
+  });
+
+  it('two disjoint clusters in one batch → two SourceEvents', () => {
+    const evts = [
+      coinsetReorgEvent({ height: 100, depth: 1, max_depth: 1 }),
+      coinsetReorgEvent({ height: 200, depth: 2, max_depth: 2 }),
+      coinsetReorgEvent({ height: 201, depth: 2, max_depth: 2 }),
+    ];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ low: 100, high: 100 });
+    expect(out[1]).toMatchObject({ low: 200, high: 201 });
+  });
+
+  it('input order does not matter (sorts internally)', () => {
+    const evts = [
+      coinsetReorgEvent({ height: 102, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 100, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 101, depth: 3, max_depth: 3 }),
+    ];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ low: 100, high: 102 });
+  });
+
+  it('a 3-height observed cluster + local detection of the same 3-height cluster → ONE match (not 3 outcomes)', async () => {
+    const evts = [
+      coinsetReorgEvent({ height: 100, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 101, depth: 3, max_depth: 3 }),
+      coinsetReorgEvent({ height: 102, depth: 3, max_depth: 3 }),
+    ];
+    const outcomes: DispatchOutcome[] = [];
+    const c = createDualSource('both', (o) => {
+      outcomes.push(o);
+    });
+    for (const s of consolidateCoinsetBatch(evts)) c.noteReorg(s);
+    c.noteReorg(localSourceEvent(100, 102, 3));
+    await c.notePeak('coinset', 200);
+    await c.notePeak('local', 200);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.kind).toBe('matched');
   });
 });
 
