@@ -17,6 +17,9 @@ Emits TSV to stdout with columns:
   9: signage_point_index (0-63)
  10: farmer_reward_puzzle_hash_hex
  11: timestamp_unix (empty string when not a tx block)
+ 12: is_transaction_block (0 or 1)
+ 13: generator_size_bytes (empty string when no transactions_generator)
+ 14: total_cost (empty string when not a tx block)
 
 `pool_type` is either "pool_pk" or "pool_contract" — pool_value_hex is the
 corresponding G1 pubkey hex or 32-byte puzzle-hash hex.
@@ -101,10 +104,16 @@ def _format_pos(height: int, hh_hex: str, block: FullBlock) -> str:
     farmer_ph_hex = block.foliage.foliage_block_data.farmer_reward_puzzle_hash.hex()
     ftb = block.foliage_transaction_block
     timestamp = str(ftb.timestamp) if ftb is not None else ""
+    is_tx_block = 1 if ftb is not None else 0
+    gen = block.transactions_generator
+    generator_size = str(len(bytes(gen))) if gen is not None else ""
+    tinfo = block.transactions_info
+    total_cost = str(tinfo.cost) if tinfo is not None else ""
     return "\t".join([
         str(height), hh_hex, str(k), challenge_hex, plot_pk_hex,
         pool_value_hex, pool_type, proof_sha,
         str(sp_index), farmer_ph_hex, timestamp,
+        str(is_tx_block), generator_size, total_cost,
     ])
 
 

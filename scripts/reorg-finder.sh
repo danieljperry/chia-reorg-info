@@ -70,11 +70,15 @@
 #   --aggregate-stats  Replace the per-reorg output with a summary report
 #                  over the scanned range: reorg count + depth distribution
 #                  + rate, orphan distribution by pool and by farmer reward
-#                  puzzle hash, signage point index distribution, and
-#                  timestamp-gap stats (sibling delta on tx blocks). Useful
-#                  for spotting shifts between two ranges (run before/after
-#                  a height and diff the reports). Requires chia-blockchain
-#                  Python package. Incompatible with --json and -qq.
+#                  puzzle hash, signage point index distribution,
+#                  timestamp-gap stats (sibling delta on tx blocks), and
+#                  block-content comparison between orphans and canonicals
+#                  at reorged heights (tx-block ratio, block size, generator
+#                  size, total cost, parent-is-orphan rate, fully-
+#                  compactified rate). Useful for spotting shifts between
+#                  two ranges (run before/after a height and diff the
+#                  reports). Requires chia-blockchain Python package.
+#                  Incompatible with --json and -qq.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -908,6 +912,103 @@ if [[ "$AGGREGATE_STATS" == "true" ]]; then
     printf "  median: %ds  max: %ds  (N=%d tx-block reorgs at cluster top)\n" \
       "$median" "$max" "$n"
   fi
+
+  # ---- Block-content comparison: orphans vs canonicals at reorged heights ----
+  # Designed to surface content-level differences a soft fork might cause.
+  # All comparisons are scoped to the SAME heights (one canonical + one or
+  # more orphans per height), so farmer/pool/epoch differences are
+  # controlled for; only content-of-block differences show up.
+  echo
+  echo "Block content stats (orphans vs canonicals at reorged heights):"
+
+  # Per-block metadata available directly from SQL (no decode).
+  BLOCK_META=$(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
+    "SELECT height, lower(hex(header_hash)), in_main_chain, length(block), is_fully_compactified \
+     FROM full_blocks WHERE height IN ($HEIGHT_LIST);")
+  n_orphans_total=$(awk -F '\t' '$3 == 0' <<< "$BLOCK_META" | wc -l)
+  n_canon_total=$(awk -F '\t' '$3 == 1' <<< "$BLOCK_META" | wc -l)
+
+  # Join BLOCK_META (in_main_chain + size + fc) with POS_DATA (helper output)
+  # by (height, hash). Joined columns: $1=in_main_chain, $2=block_length,
+  # $3=fc, then POS_DATA's 14 columns starting at $4 — so POS_DATA col N is
+  # JOINED col (N + 3): col 12 (is_tx) = $15, col 13 (gen_size) = $16,
+  # col 14 (total_cost) = $17.
+  JOINED=$(awk -F '\t' '
+    NR==FNR { meta[$1 SUBSEP $2] = $3 "\t" $4 "\t" $5; next }
+    ($1 SUBSEP $2) in meta { print meta[$1 SUBSEP $2] "\t" $0 }
+  ' <(printf '%s' "$BLOCK_META") <(printf '%s' "$POS_DATA"))
+
+  # Median + mean over an integer list on stdin. Prints "n/a" when empty.
+  _stats() {
+    awk '
+      { a[++n] = $1 + 0; sum += $1 }
+      END {
+        if (n == 0) { print "n/a"; exit }
+        asort(a)
+        median = (n % 2 == 1) ? a[int(n/2)+1] : int((a[n/2] + a[n/2+1]) / 2)
+        printf "median %d, mean %d (n=%d)", median, int(sum/n), n
+      }'
+  }
+
+  # "X of Y (Z.Z%)" or "0 of 0 (n/a)" for empty denominator.
+  _ratio() {
+    local count=$1 total=$2
+    if [[ $total -eq 0 ]]; then
+      printf "0 of 0 (n/a)"
+    else
+      printf "%d of %d (%.1f%%)" "$count" "$total" \
+        "$(awk -v c="$count" -v t="$total" 'BEGIN { print c*100/t }')"
+    fi
+  }
+
+  # 1. Tx-block ratio
+  echo "  Transaction blocks:"
+  tx_orphan=$(awk -F '\t' '$1 == 0 && $15 == 1' <<< "$JOINED" | wc -l)
+  tx_canon=$(awk -F '\t' '$1 == 1 && $15 == 1' <<< "$JOINED" | wc -l)
+  printf "    Orphans:    %s\n" "$(_ratio "$tx_orphan" "$n_orphans_total")"
+  printf "    Canonicals: %s\n" "$(_ratio "$tx_canon" "$n_canon_total")"
+
+  # 2. Block size (compressed BLOB length)
+  echo "  Block size (compressed bytes):"
+  printf "    Orphans:    %s\n" \
+    "$(awk -F '\t' '$3 == 0 { print $4 }' <<< "$BLOCK_META" | _stats)"
+  printf "    Canonicals: %s\n" \
+    "$(awk -F '\t' '$3 == 1 { print $4 }' <<< "$BLOCK_META" | _stats)"
+
+  # 3. Generator size (tx blocks only)
+  echo "  Generator size (bytes, tx blocks only):"
+  printf "    Orphans:    %s\n" \
+    "$(awk -F '\t' '$1 == 0 && $15 == 1 && $16 != "" { print $16 }' <<< "$JOINED" | _stats)"
+  printf "    Canonicals: %s\n" \
+    "$(awk -F '\t' '$1 == 1 && $15 == 1 && $16 != "" { print $16 }' <<< "$JOINED" | _stats)"
+
+  # 4. Total cost (tx blocks only)
+  echo "  Total cost (tx blocks only):"
+  printf "    Orphans:    %s\n" \
+    "$(awk -F '\t' '$1 == 0 && $15 == 1 && $17 != "" { print $17 }' <<< "$JOINED" | _stats)"
+  printf "    Canonicals: %s\n" \
+    "$(awk -F '\t' '$1 == 1 && $15 == 1 && $17 != "" { print $17 }' <<< "$JOINED" | _stats)"
+
+  # 5. Parent-is-orphan rate (orphans only — canonicals always have canonical
+  # parents). Counts orphans whose prev_hash points at another orphan in the
+  # scan range. Indicates extended forks vs depth-1 propagation races.
+  parent_orphan_count=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+    "SELECT COUNT(*) FROM full_blocks o \
+     WHERE o.height IN ($HEIGHT_LIST) AND o.in_main_chain = 0 \
+       AND EXISTS ( \
+         SELECT 1 FROM full_blocks p \
+         WHERE p.header_hash = o.prev_hash AND p.in_main_chain = 0 \
+       );")
+  echo "  Parent-is-orphan rate (orphans only):"
+  printf "    %s — orphans whose parent is also an orphan\n" \
+    "$(_ratio "$parent_orphan_count" "$n_orphans_total")"
+
+  # 6. Fully-compactified rate
+  echo "  Fully-compactified rate:"
+  fc_orphan=$(awk -F '\t' '$3 == 0 && $5 == 1' <<< "$BLOCK_META" | wc -l)
+  fc_canon=$(awk -F '\t' '$3 == 1 && $5 == 1' <<< "$BLOCK_META" | wc -l)
+  printf "    Orphans:    %s\n" "$(_ratio "$fc_orphan" "$n_orphans_total")"
+  printf "    Canonicals: %s\n" "$(_ratio "$fc_canon" "$n_canon_total")"
 
   exit 0
 fi
