@@ -65,6 +65,10 @@
 #   CHIA_SSL_DIR   Path to full-node SSL dir
 #                  (default: ~/.chia/mainnet/config/ssl/full_node)
 #   NODE_HOST      Full node RPC base URL (default: https://localhost:8555)
+#   CHIA_PYTHON    Path to a Python interpreter that can `import chia`.
+#                  Required for proof-of-space output and --compare-proofs.
+#                  Auto-detected from `which chia` if unset. Example:
+#                  CHIA_PYTHON=~/chia-blockchain/venv/bin/python
 
 main() {
   set -euo pipefail
@@ -86,6 +90,12 @@ main() {
   local CERT_PATH="$SSL_DIR/private_full_node.crt"
   local KEY_PATH="$SSL_DIR/private_full_node.key"
   local NODE_HOST="${NODE_HOST:-https://localhost:8555}"
+  # Python interpreter used to import chia-blockchain (for --compare-proofs
+  # and the proof-of-space output in the per-block-detail section). System
+  # python3 typically doesn't have chia installed — chia is normally in its
+  # own venv. We try $CHIA_PYTHON, then derive from `which chia`'s shebang,
+  # then fall back to python3.
+  local CHIA_PYTHON_BIN=""
 
   usage() {
     sed -n '2,/^$/p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
@@ -576,7 +586,33 @@ fi
 # -----------------------------------------------------------------------------
 POS_DATA=""
 POS_AVAILABLE="false"
+POS_ERROR=""
 POS_HELPER="$(dirname "$SCRIPT_PATH")/_decode_pos.py"
+
+# Resolve a Python interpreter that can `import chia`. Order:
+#   1. $CHIA_PYTHON if set (user override)
+#   2. Shebang of `which chia` (chia's CLI is a console_scripts entry point
+#      whose first line points at the venv's python).
+#   3. Fall back to `python3` (will fail if chia isn't in the system python).
+_resolve_chia_python() {
+  if [[ -n "${CHIA_PYTHON:-}" ]]; then
+    printf '%s' "$CHIA_PYTHON"
+    return
+  fi
+  local chia_bin shebang
+  if chia_bin=$(command -v chia 2>/dev/null); then
+    shebang=$(head -n 1 "$chia_bin" 2>/dev/null || true)
+    if [[ "$shebang" =~ ^\#![[:space:]]*(/[^[:space:]]+) ]]; then
+      local interp="${BASH_REMATCH[1]}"
+      if [[ "$interp" == *python* && -x "$interp" ]]; then
+        printf '%s' "$interp"
+        return
+      fi
+    fi
+  fi
+  printf '%s' "python3"
+}
+CHIA_PYTHON_BIN=$(_resolve_chia_python)
 
 NEED_POS="false"
 [[ "$QUIET" == "false" || "$COMPARE_PROOFS" == "true" ]] && NEED_POS="true"
@@ -600,10 +636,19 @@ if [[ "$NEED_POS" == "true" && -r "$POS_HELPER" ]]; then
   fi
 
   if [[ -n "$POS_PAIRS" ]]; then
-    POS_DATA=$(printf '%s' "$POS_PAIRS" | python3 "$POS_HELPER" "$DB_PATH" 2>/dev/null || true)
+    local pos_stderr
+    pos_stderr=$(mktemp)
+    POS_DATA=$(printf '%s' "$POS_PAIRS" | "$CHIA_PYTHON_BIN" "$POS_HELPER" "$DB_PATH" 2>"$pos_stderr" || true)
     if [[ -n "$POS_DATA" ]]; then
       POS_AVAILABLE="true"
+    else
+      # Surface the helper's stderr (first line) and the python path tried,
+      # so the user can fix it quickly (usually: set CHIA_PYTHON to the
+      # right venv).
+      POS_ERROR=$(head -n 1 "$pos_stderr" 2>/dev/null || true)
+      [[ -z "$POS_ERROR" ]] && POS_ERROR="helper exited with no output"
     fi
+    rm -f "$pos_stderr"
   fi
 fi
 
@@ -691,7 +736,11 @@ if [[ "$COMPARE_PROOFS" == "true" ]]; then
     [[ $PROOF_UNAVAIL_COUNT -gt 0 ]] && extra=" ($PROOF_UNAVAIL_COUNT unavailable)"
     echo "Of those reorgs, $PROOF_MATCH_COUNT have matching proofs and $PROOF_NOMATCH_COUNT have differing proofs.$extra"
   else
-    echo "Of those reorgs, proof comparison is unavailable (chia-blockchain Python package not importable)."
+    echo "Of those reorgs, proof comparison is unavailable."
+    echo "  Tried python: $CHIA_PYTHON_BIN"
+    echo "  Error: $POS_ERROR"
+    echo "  Hint: set CHIA_PYTHON to your chia venv's python, e.g.:"
+    echo "        CHIA_PYTHON=~/chia-blockchain/venv/bin/python ./reorg-finder.sh ..."
   fi
 fi
 
@@ -749,9 +798,14 @@ SQL
     fi
   elif [[ "$NEED_POS" == "true" ]]; then
     # User wanted PoS info but the helper failed (chia-blockchain not
-    # installed, or python3 not on PATH, etc.). Don't silently omit.
+    # installed, wrong python, etc.). Don't silently omit — surface the
+    # python tried and the helper's error so the user can fix it.
     echo
-    echo "Proof of Space: unavailable (chia-blockchain Python package not importable)."
+    echo "Proof of Space: unavailable."
+    echo "  Tried python: $CHIA_PYTHON_BIN"
+    echo "  Error: $POS_ERROR"
+    echo "  Hint: set CHIA_PYTHON to your chia venv's python, e.g.:"
+    echo "        CHIA_PYTHON=~/chia-blockchain/venv/bin/python ./reorg-finder.sh ..."
   fi
 fi
 }
