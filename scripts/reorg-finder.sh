@@ -23,6 +23,7 @@
 #   ./reorg-finder.sh [-n COUNT] [-e END_HEIGHT] [-l LIMIT] [-m MIN_DEPTH]
 #                     [-q [true|false]] [-qq [true|false]] [-d DB_PATH]
 #                     [--json] [--peak-from rpc|db] [--compare-proofs]
+#                     [--aggregate-stats]
 #
 #   -n COUNT       Number of blocks to examine (default: 10). Pass `g` or
 #                  `genesis` to scan every block from END_HEIGHT down to the
@@ -66,6 +67,14 @@
 #                  Same challenge with the same plot_pk is even more so —
 #                  it means the same farmer produced two different blocks
 #                  for the same slot.
+#   --aggregate-stats  Replace the per-reorg output with a summary report
+#                  over the scanned range: reorg count + depth distribution
+#                  + rate, orphan distribution by pool and by farmer reward
+#                  puzzle hash, signage point index distribution, and
+#                  timestamp-gap stats (sibling delta on tx blocks). Useful
+#                  for spotting shifts between two ranges (run before/after
+#                  a height and diff the reports). Requires chia-blockchain
+#                  Python package. Incompatible with --json and -qq.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -94,6 +103,7 @@ main() {
   local JSON_OUT="false"
   local PEAK_FROM="rpc"
   local COMPARE_PROOFS="false"
+  local AGGREGATE_STATS="false"
   local DB_PATH="${CHIA_DB:-$HOME/.chia/mainnet/db/blockchain_v2_mainnet.sqlite}"
   local SSL_DIR="${CHIA_SSL_DIR:-$HOME/.chia/mainnet/config/ssl/full_node}"
   local CERT_PATH="$SSL_DIR/private_full_node.crt"
@@ -136,6 +146,9 @@ while [[ $# -gt 0 ]]; do
     shift 2
   elif [[ "$1" == "--compare-proofs" ]]; then
     COMPARE_PROOFS="true"
+    shift
+  elif [[ "$1" == "--aggregate-stats" ]]; then
+    AGGREGATE_STATS="true"
     shift
   elif [[ "$1" == "-q" ]]; then
     PRE_ARGS+=("-q")
@@ -223,6 +236,19 @@ if [[ "$JSON_OUT" == "true" ]] && { [[ "$QUIET" == "true" ]] || [[ "$QQ_QUIET" =
   exit 2
 fi
 
+# --aggregate-stats is its own output mode; reject combinations that would
+# emit two different outputs from the same run.
+if [[ "$AGGREGATE_STATS" == "true" ]]; then
+  if [[ "$JSON_OUT" == "true" ]]; then
+    echo "Error: --aggregate-stats is incompatible with --json" >&2
+    exit 2
+  fi
+  if [[ "$QQ_QUIET" == "true" ]]; then
+    echo "Error: --aggregate-stats is incompatible with -qq" >&2
+    exit 2
+  fi
+fi
+
 if [[ -z "$END_HEIGHT" ]]; then
   if [[ "$PEAK_FROM" == "db" ]]; then
     # Local-only peak: SELECT MAX(height) FROM full_blocks. Requires the DB
@@ -299,6 +325,10 @@ if [[ -z "$IN_RANGE_HEIGHTS" ]]; then
       "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT"
   elif [[ "$QQ_QUIET" == "true" ]]; then
     echo "Found 0 reorgs of at least $MIN_DEPTH blocks in the specified range."
+  elif [[ "$AGGREGATE_STATS" == "true" ]]; then
+    total_blocks=$((END_HEIGHT - START_HEIGHT + 1))
+    echo "Range: heights $START_HEIGHT..$END_HEIGHT ($total_blocks blocks)"
+    echo "Reorgs: 0 total — rate 0.0 per 1000 blocks"
   else
     echo "No re-orged heights found in range."
   fi
@@ -367,6 +397,10 @@ if [[ ${#KEPT_LOWS[@]} -eq 0 ]]; then
       "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT"
   elif [[ "$QQ_QUIET" == "true" ]]; then
     echo "Found 0 reorgs of at least $MIN_DEPTH blocks in the specified range."
+  elif [[ "$AGGREGATE_STATS" == "true" ]]; then
+    total_blocks=$((END_HEIGHT - START_HEIGHT + 1))
+    echo "Range: heights $START_HEIGHT..$END_HEIGHT ($total_blocks blocks)"
+    echo "Reorgs: 0 total — rate 0.0 per 1000 blocks"
   elif [[ $MIN_DEPTH -eq 1 ]]; then
     echo "No re-orged heights found in range."
   else
@@ -624,12 +658,13 @@ _resolve_chia_python() {
 CHIA_PYTHON_BIN=$(_resolve_chia_python)
 
 NEED_POS="false"
-[[ "$QUIET" == "false" || "$COMPARE_PROOFS" == "true" ]] && NEED_POS="true"
+[[ "$QUIET" == "false" || "$COMPARE_PROOFS" == "true" || "$AGGREGATE_STATS" == "true" ]] && NEED_POS="true"
 
 if [[ "$NEED_POS" == "true" && -r "$POS_HELPER" ]]; then
   POS_PAIRS=""
-  if [[ "$QUIET" == "false" ]]; then
-    # All blocks at all cluster heights.
+  if [[ "$QUIET" == "false" || "$AGGREGATE_STATS" == "true" ]]; then
+    # All blocks at all cluster heights — needed for the per-block-detail
+    # section (when -q is not set) and for orphan-aggregation stats.
     while IFS=$'\t' read -r _h _hh; do
       [[ -n "$_h" ]] && POS_PAIRS+="$_h	$_hh"$'\n'
     done < <(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
@@ -730,6 +765,152 @@ _proof_suffix() {
     echo " — challenge: $cs, plot_pk: $ps"
   fi
 }
+
+# --aggregate-stats: emit summary report instead of the per-reorg list.
+# Counts and distributions are computed over orphans (in_main_chain=0) across
+# every height in every surviving cluster; timestamp gaps are per-reorg
+# at the cluster top (high) when both siblings are tx blocks.
+if [[ "$AGGREGATE_STATS" == "true" ]]; then
+  total_blocks=$((END_HEIGHT - START_HEIGHT + 1))
+  echo "Range: heights $START_HEIGHT..$END_HEIGHT ($total_blocks blocks)"
+
+  # Reorg rate per 1000 blocks, 1 decimal.
+  rate=$(awk -v n="$N_CLUSTERS" -v t="$total_blocks" \
+    'BEGIN { printf "%.1f", (t > 0 ? n * 1000.0 / t : 0) }')
+  echo "Reorgs: $N_CLUSTERS total — rate $rate per 1000 blocks"
+
+  # Depth distribution: 1, 2, 3+ buckets.
+  d1=0; d2=0; d3p=0
+  for i in "${!CLUSTER_LOWS[@]}"; do
+    sz=$((CLUSTER_HIGHS[$i] - CLUSTER_LOWS[$i] + 1))
+    if [[ $sz -eq 1 ]]; then d1=$((d1+1))
+    elif [[ $sz -eq 2 ]]; then d2=$((d2+1))
+    else d3p=$((d3p+1)); fi
+  done
+  echo "Depth distribution:"
+  printf "  depth 1:  %d\n" "$d1"
+  printf "  depth 2:  %d\n" "$d2"
+  printf "  depth 3+: %d\n" "$d3p"
+
+  if [[ "$POS_AVAILABLE" != "true" ]]; then
+    echo
+    echo "Orphan-detail sections unavailable (proof-of-space helper failed):"
+    echo "  Tried python: $CHIA_PYTHON_BIN"
+    echo "  Helper output:"
+    while IFS= read -r _line; do echo "    $_line"; done <<< "$POS_ERROR"
+    echo "  Hint: set CHIA_PYTHON to a venv with chia-blockchain importable."
+    exit 0
+  fi
+
+  # Project ORPHAN_POS = subset of POS_DATA rows where in_main_chain=0.
+  # We join POS_DATA against an orphan-(height,hash) set sourced from the DB.
+  ORPHAN_PAIRS=$(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
+    "SELECT height, lower(hex(header_hash)) FROM full_blocks \
+     WHERE height IN ($HEIGHT_LIST) AND in_main_chain = 0 ORDER BY height;")
+  ORPHAN_POS=$(awk -F '\t' '
+    NR==FNR { o[$1 SUBSEP $2] = 1; next }
+    ($1 SUBSEP $2) in o { print }
+  ' <(printf '%s' "$ORPHAN_PAIRS") <(printf '%s' "$POS_DATA"))
+  total_orphans=$(printf '%s' "$ORPHAN_POS" | grep -c $'\t' || true)
+
+  # Orphans by pool (top 10). Key = pool_type:pool_value.
+  echo
+  echo "Orphans by pool (top 10):"
+  if [[ $total_orphans -gt 0 ]]; then
+    printf '%s\n' "$ORPHAN_POS" \
+      | awk -F '\t' '{ print $7 ":" $6 }' \
+      | sort | uniq -c | sort -rn | head -10 \
+      | awk -v t="$total_orphans" '
+          {
+            count = $1
+            $1 = ""
+            sub(/^ /, "")
+            split($0, parts, ":")
+            ptype = parts[1]
+            pvalue = parts[2]
+            short = (length(pvalue) > 16 ? substr(pvalue, 1, 8) "…" substr(pvalue, length(pvalue)-3) : pvalue)
+            pct = (t > 0 ? count * 100.0 / t : 0)
+            printf "  %-14s %s   %3d (%4.1f%%)\n", ptype, short, count, pct
+          }'
+  else
+    echo "  (no orphans)"
+  fi
+
+  # Orphans by farmer reward puzzle hash (top 10).
+  echo
+  echo "Orphans by farmer (top 10):"
+  if [[ $total_orphans -gt 0 ]]; then
+    printf '%s\n' "$ORPHAN_POS" \
+      | awk -F '\t' '{ print $10 }' \
+      | sort | uniq -c | sort -rn | head -10 \
+      | awk -v t="$total_orphans" '
+          {
+            count = $1
+            f = $2
+            short = (length(f) > 16 ? substr(f, 1, 8) "…" substr(f, length(f)-3) : f)
+            pct = (t > 0 ? count * 100.0 / t : 0)
+            printf "  %s   %3d (%4.1f%%)\n", short, count, pct
+          }'
+  else
+    echo "  (no orphans)"
+  fi
+
+  # Signage point index distribution (orphans). 4 buckets across 0..63.
+  echo
+  echo "Signage point index distribution (orphans):"
+  if [[ $total_orphans -gt 0 ]]; then
+    printf '%s\n' "$ORPHAN_POS" \
+      | awk -F '\t' '
+          {
+            sp = $9 + 0
+            if (sp < 16) b1++
+            else if (sp < 32) b2++
+            else if (sp < 48) b3++
+            else b4++
+          }
+          END {
+            printf "  0-15:   %3d\n", b1+0
+            printf "  16-31:  %3d\n", b2+0
+            printf "  32-47:  %3d\n", b3+0
+            printf "  48-63:  %3d\n", b4+0
+          }'
+  else
+    echo "  (no orphans)"
+  fi
+
+  # Timestamp gap (sibling delta, tx blocks only) — per-reorg at cluster top.
+  gaps=()
+  for i in "${!CLUSTER_HIGHS[@]}"; do
+    high=${CLUSTER_HIGHS[$i]}
+    canon_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
+    orph_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
+    canon_ts=$(_pos_field "$high" "$canon_hash" 11)
+    orph_ts=$(_pos_field "$high" "$orph_hash" 11)
+    if [[ -n "$canon_ts" && -n "$orph_ts" ]]; then
+      if [[ "$canon_ts" -ge "$orph_ts" ]]; then
+        gaps+=("$((canon_ts - orph_ts))")
+      else
+        gaps+=("$((orph_ts - canon_ts))")
+      fi
+    fi
+  done
+  echo
+  echo "Timestamp gap (sibling delta, tx blocks only):"
+  if [[ ${#gaps[@]} -eq 0 ]]; then
+    echo "  (no reorgs where both siblings at the cluster top are tx blocks)"
+  else
+    sorted_gaps=($(printf '%s\n' "${gaps[@]}" | sort -n))
+    n=${#sorted_gaps[@]}
+    median=${sorted_gaps[$((n / 2))]}
+    max=${sorted_gaps[$((n - 1))]}
+    printf "  median: %ds  max: %ds  (N=%d tx-block reorgs at cluster top)\n" \
+      "$median" "$max" "$n"
+  fi
+
+  exit 0
+fi
 
 if [[ $N_CLUSTERS -eq 1 ]]; then
   size=$((CLUSTER_HIGHS[0] - CLUSTER_LOWS[0] + 1))

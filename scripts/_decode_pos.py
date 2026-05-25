@@ -6,7 +6,17 @@ from Chia v2 full_blocks rows.
 Usage: _decode_pos.py DB_PATH
 Reads tab-separated `height<TAB>header_hash_hex` pairs from stdin, one per line.
 Emits TSV to stdout with columns:
-  height  header_hash_hex  k  challenge_hex  plot_pk_hex  pool_value_hex  pool_type  proof_sha256_hex
+  1: height
+  2: header_hash_hex
+  3: k (plot size)
+  4: challenge_hex
+  5: plot_pk_hex
+  6: pool_value_hex
+  7: pool_type ("pool_pk" | "pool_contract" | "none")
+  8: proof_sha256_hex
+  9: signage_point_index (0-63)
+ 10: farmer_reward_puzzle_hash_hex
+ 11: timestamp_unix (empty string when not a tx block)
 
 `pool_type` is either "pool_pk" or "pool_contract" — pool_value_hex is the
 corresponding G1 pubkey hex or 32-byte puzzle-hash hex.
@@ -87,7 +97,15 @@ def _format_pos(height: int, hh_hex: str, block: FullBlock) -> str:
         pool_type = "none"
         pool_value_hex = ""
     proof_sha = hashlib.sha256(bytes(pos.proof)).hexdigest()
-    return f"{height}\t{hh_hex}\t{k}\t{challenge_hex}\t{plot_pk_hex}\t{pool_value_hex}\t{pool_type}\t{proof_sha}"
+    sp_index = block.reward_chain_block.signage_point_index
+    farmer_ph_hex = block.foliage.foliage_block_data.farmer_reward_puzzle_hash.hex()
+    ftb = block.foliage_transaction_block
+    timestamp = str(ftb.timestamp) if ftb is not None else ""
+    return "\t".join([
+        str(height), hh_hex, str(k), challenge_hex, plot_pk_hex,
+        pool_value_hex, pool_type, proof_sha,
+        str(sp_index), farmer_ph_hex, timestamp,
+    ])
 
 
 def main() -> int:
