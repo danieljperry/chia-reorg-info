@@ -16,6 +16,11 @@ export type LocalReorg = {
   depth: number;
   ts_low_unix: number | null;
   ts_high_unix: number | null;
+  /** Orphaned block's header_hash at `high`, lowercase hex without 0x.
+   *  Null if the JSON omits the field (older script) or the query failed. */
+  old_hash: string | null;
+  /** Canonical block's header_hash at `high`, same encoding. */
+  new_hash: string | null;
 };
 
 export type LocalScanResult = {
@@ -90,12 +95,20 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
     if (!isNonNegInt(e.depth)) return null;
     if (e.ts_low_unix !== null && !isNonNegInt(e.ts_low_unix)) return null;
     if (e.ts_high_unix !== null && !isNonNegInt(e.ts_high_unix)) return null;
+    // Hash fields are optional (older scripts don't emit them). When present
+    // they must be a string or null; anything else fails validation.
+    const old_hash = e.old_hash === undefined ? null : e.old_hash;
+    const new_hash = e.new_hash === undefined ? null : e.new_hash;
+    if (old_hash !== null && typeof old_hash !== 'string') return null;
+    if (new_hash !== null && typeof new_hash !== 'string') return null;
     reorgs.push({
       low: e.low,
       high: e.high,
       depth: e.depth,
       ts_low_unix: e.ts_low_unix,
       ts_high_unix: e.ts_high_unix,
+      old_hash,
+      new_hash,
     });
   }
   return {

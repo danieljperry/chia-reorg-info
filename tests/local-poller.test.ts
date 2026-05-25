@@ -188,6 +188,52 @@ describe('validateLocalScanResult', () => {
     expect(validateLocalScanResult(v)).not.toBeNull();
   });
 
+  it('accepts old_hash/new_hash when present', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_hash: 'd17e2cf5cc3e32a5c3f52ef031139775d9a5db20bf1b26b14ca3826dac54615f',
+        new_hash: 'a4ec9dc5ddf1dd0b5c894c9989780e6be2bb9e69e418ad037504aa5f15833a41',
+      }],
+    };
+    const result = validateLocalScanResult(v);
+    expect(result).not.toBeNull();
+    expect(result?.reorgs[0]?.old_hash).toMatch(/^d17e/);
+    expect(result?.reorgs[0]?.new_hash).toMatch(/^a4ec/);
+  });
+
+  it('accepts old_hash/new_hash as null', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_hash: null, new_hash: null,
+      }],
+    };
+    const result = validateLocalScanResult(v);
+    expect(result?.reorgs[0]?.old_hash).toBeNull();
+    expect(result?.reorgs[0]?.new_hash).toBeNull();
+  });
+
+  it('treats missing old_hash/new_hash fields as null (older bash script versions)', () => {
+    // The "valid" fixture omits hash fields, mirroring an older script.
+    const result = validateLocalScanResult(valid);
+    expect(result?.reorgs[0]?.old_hash).toBeNull();
+    expect(result?.reorgs[0]?.new_hash).toBeNull();
+  });
+
+  it('rejects non-string, non-null old_hash', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_hash: 42, new_hash: null,
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
   it.each<{ label: string; raw: unknown }>([
     { label: 'null root', raw: null },
     { label: 'string root', raw: 'string' },

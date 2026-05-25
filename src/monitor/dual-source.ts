@@ -29,6 +29,11 @@ export type SourceEvent = {
   ts_low_unix?: number | null;
   /** Wall-clock end of the cluster (unix seconds, may be null for non-tx). */
   ts_high_unix?: number | null;
+  /** Orphaned block's header_hash at the cluster top (`high`). Lowercase hex,
+   *  no `0x` prefix. Null/undefined when the source can't supply it. */
+  old_header_hash?: string | null;
+  /** Canonical block's header_hash at the cluster top, same encoding. */
+  new_header_hash?: string | null;
 };
 
 export type DispatchOutcome =

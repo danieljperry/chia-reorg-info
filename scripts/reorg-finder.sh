@@ -510,6 +510,12 @@ if [[ "$JSON_OUT" == "true" ]]; then
   # Resolve a timestamp for each cluster's low+high in unix-seconds form.
   # Resolution is the same forward-walk used by the prose report, so the
   # JSON values represent the same anchor points.
+  #
+  # Also resolve the orphaned (`old_hash`) and canonical (`new_hash`) header
+  # hashes at the cluster's top height (`high`). Both are queryable from the
+  # DB because the whole reason `high` is in our cluster is that it has
+  # multiple block records. Hashes are returned without `0x` prefix and
+  # lowercased; either may be null if the row vanishes mid-scan (defensive).
   json_reorgs=""
   for i in "${!CLUSTER_LOWS[@]}"; do
     low="${CLUSTER_LOWS[$i]}"
@@ -523,8 +529,14 @@ if [[ "$JSON_OUT" == "true" ]]; then
     fi
     [[ -z "$ts_low" ]] && ts_low="null"
     [[ -z "$ts_high" ]] && ts_high="null"
+    old_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
+    new_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
+    if [[ -n "$old_hash" ]]; then old_hash_json="\"$old_hash\""; else old_hash_json="null"; fi
+    if [[ -n "$new_hash" ]]; then new_hash_json="\"$new_hash\""; else new_hash_json="null"; fi
     if [[ -n "$json_reorgs" ]]; then json_reorgs+=","; fi
-    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high}"
+    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high,\"old_hash\":$old_hash_json,\"new_hash\":$new_hash_json}"
   done
   printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[%s]}\n' \
     "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT" "$json_reorgs"

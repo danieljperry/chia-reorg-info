@@ -77,6 +77,47 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     );
   });
 
+  it('local-only outcome includes the actual hashes from the local DB when supplied', async () => {
+    mockSendMail.mockClear();
+    const localSource = {
+      source: 'local' as const,
+      low: 8773500,
+      high: 8773500,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T02:45:27.985Z',
+      old_header_hash: 'd17e2cf5cc3e32a5c3f52ef031139775d9a5db20bf1b26b14ca3826dac54615f',
+      new_header_hash: 'a4ec9dc5ddf1dd0b5c894c9989780e6be2bb9e69e418ad037504aa5f15833a41',
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    expect(evt.old_header_hash).toBe(localSource.old_header_hash);
+    expect(evt.new_header_hash).toBe(localSource.new_header_hash);
+
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 8773500, {
+      subjectSuffix: ' — local DB only',
+    });
+    const body = (mockSendMail.mock.calls[0]?.[0] as { text: string }).text;
+    expect(body).toContain('d17e2cf5cc3e32a5c3f52ef031139775d9a5db20bf1b26b14ca3826dac54615f');
+    expect(body).toContain('a4ec9dc5ddf1dd0b5c894c9989780e6be2bb9e69e418ad037504aa5f15833a41');
+    expect(body).not.toContain('unavailable');
+  });
+
+  it('local source with null hashes falls back to "(unavailable — local DB detection)"', () => {
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T02:45:27.985Z',
+      old_header_hash: null,
+      new_header_hash: null,
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    expect(evt.old_header_hash).toBe('(unavailable — local DB detection)');
+    expect(evt.new_header_hash).toBe('(unavailable — local DB detection)');
+  });
+
   it('local-only outcome shows exact local depth (no Coinset range to merge)', async () => {
     mockSendMail.mockClear();
 

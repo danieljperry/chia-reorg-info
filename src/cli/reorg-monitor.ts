@@ -477,6 +477,8 @@ export function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): Sou
     detected_at_iso: evt.detected_at,
     ts_low_unix: null,
     ts_high_unix: null,
+    old_header_hash: evt.old_header_hash,
+    new_header_hash: evt.new_header_hash,
   };
 }
 
@@ -490,6 +492,8 @@ function localReorgToSourceEvent(r: LocalReorg & { detected_at_iso: string }): S
     detected_at_iso: r.detected_at_iso,
     ts_low_unix: r.ts_low_unix,
     ts_high_unix: r.ts_high_unix,
+    old_header_hash: r.old_hash,
+    new_header_hash: r.new_hash,
   };
 }
 
@@ -498,8 +502,8 @@ function synthesizeReorgEventFromLocal(
 ): ReorgEvent {
   return {
     height: r.high,
-    old_header_hash: '(unavailable — local DB detection)',
-    new_header_hash: '(unavailable — local DB detection)',
+    old_header_hash: r.old_hash ?? '(unavailable — local DB detection)',
+    new_header_hash: r.new_hash ?? '(unavailable — local DB detection)',
     detected_at: r.detected_at_iso,
     depth: r.depth,
     max_depth: r.depth,
@@ -608,16 +612,19 @@ export function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
   // reorgEventToSourceEvent) — use `low` which is the actual observed
   // changed height. For local events, `high` is the top of the exact
   // observed cluster.
+  //
+  // Prefer the SourceEvent's hash fields when populated (local: from the
+  // bash script's DB queries; coinset: from the original RPC response).
+  // Fall back to a per-source placeholder when the source didn't supply
+  // them (older bash scripts that omit the field, or a row that vanished
+  // mid-scan).
+  const localFallback = '(unavailable — local DB detection)';
+  const coinsetFallback = '(see Coinset event)';
+  const fallback = s.source === 'local' ? localFallback : coinsetFallback;
   return {
     height: s.source === 'coinset' ? s.low : s.high,
-    old_header_hash:
-      s.source === 'local'
-        ? '(unavailable — local DB detection)'
-        : '(see Coinset event)',
-    new_header_hash:
-      s.source === 'local'
-        ? '(unavailable — local DB detection)'
-        : '(see Coinset event)',
+    old_header_hash: s.old_header_hash ?? fallback,
+    new_header_hash: s.new_header_hash ?? fallback,
     detected_at: s.detected_at_iso,
     depth: s.depth,
     max_depth: s.max_depth,
