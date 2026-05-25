@@ -34,6 +34,7 @@ function localSourceEvent(low: number, high: number, depth: number): SourceEvent
     source: 'local',
     low,
     high,
+    settle_at: high,
     depth,
     max_depth: depth,
     detected_at_iso: '2026-05-25T02:45:27.985Z',
@@ -199,6 +200,7 @@ describe('synthesizeReorgEventFromSource — uses observed height not widened hi
       source: 'coinset',
       low: 8773500,
       high: 8773503, // widened
+      settle_at: 8773500, // observed top, un-widened
       depth: 1,
       max_depth: 4,
       detected_at_iso: '2026-05-25T02:45:27.985Z',
@@ -211,6 +213,7 @@ describe('synthesizeReorgEventFromSource — uses observed height not widened hi
       source: 'local',
       low: 100,
       high: 102,
+      settle_at: 102,
       depth: 3,
       max_depth: 3,
       detected_at_iso: '2026-05-25T02:45:27.985Z',

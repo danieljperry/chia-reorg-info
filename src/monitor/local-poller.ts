@@ -194,8 +194,11 @@ export async function _pollLocalOnce(opts: LocalPollerOpts): Promise<void> {
   localState.last_error = null;
   localState.peak_at_last_scan = parsed.peak_at_scan;
 
-  if (opts.on_peak) opts.on_peak(parsed.peak_at_scan);
-
+  // ORDER MATTERS: emit new reorgs BEFORE the peak update.
+  // The dual-source coordinator releases buffered events on peak updates,
+  // so if on_peak fires first, a peak advance that releases a buffered
+  // Coinset counterpart would dispatch it as single-source-only before
+  // this poll's new local event is added to the buffer.
   for (const reorg of parsed.reorgs) {
     const key = `${reorg.low}:${reorg.high}`;
     if (localState.seen.has(key)) continue;
@@ -205,6 +208,8 @@ export async function _pollLocalOnce(opts: LocalPollerOpts): Promise<void> {
       detected_at_iso: new Date().toISOString(),
     });
   }
+
+  if (opts.on_peak) opts.on_peak(parsed.peak_at_scan);
 }
 
 function scheduleNextLocal(opts: LocalPollerOpts): void {

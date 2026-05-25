@@ -76,6 +76,32 @@ describe('local-poller _pollLocalOnce', () => {
     expect(onPeak).toHaveBeenCalledWith(110);
   });
 
+  it('fires on_reorg BEFORE on_peak so the coordinator sees new events before peak-triggered release', async () => {
+    // Regression for the 8773694 incident: if on_peak fired first, a peak
+    // advance that releases a buffered counterpart from the OTHER source
+    // would dispatch it as single-source-only before this poll's new
+    // event reaches the coordinator buffer.
+    spawnMock.mockReturnValueOnce(
+      fakeChild({
+        stdout: JSON.stringify({
+          network: 'mainnet',
+          start_height: 100,
+          end_height: 110,
+          scanned_at_unix: 1,
+          peak_at_scan: 110,
+          reorgs: [{ low: 105, high: 105, depth: 1, ts_low_unix: 1, ts_high_unix: 1 }],
+        }),
+      })
+    );
+    const order: string[] = [];
+    await _pollLocalOnce({
+      ...baseOpts,
+      on_reorg: () => order.push('reorg'),
+      on_peak: () => order.push('peak'),
+    });
+    expect(order).toEqual(['reorg', 'peak']);
+  });
+
   it('dedupes by low:high across multiple polls', async () => {
     const sameReorg = JSON.stringify({
       network: 'mainnet',

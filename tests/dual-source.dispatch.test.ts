@@ -11,6 +11,7 @@ function coinsetEvt(low: number, high: number, depth: number, max_depth = depth)
     source: 'coinset',
     low,
     high,
+    settle_at: high,
     depth,
     max_depth,
     detected_at_iso: '2026-05-25T00:00:00Z',
@@ -21,6 +22,7 @@ function localEvt(low: number, high: number, depth: number): SourceEvent {
     source: 'local',
     low,
     high,
+    settle_at: high,
     depth,
     max_depth: depth,
     detected_at_iso: '2026-05-25T00:00:00Z',
@@ -211,6 +213,58 @@ describe('dual-source dispatch outcomes', () => {
     c.noteReorg(coinsetEvt(100, 100, 1));
     await c.notePeak('coinset', 102);
     expect(fn).toHaveBeenCalledOnce();
+  });
+
+  it('regression (8773694): widened coinset high does not cause local to release ahead of coinset', async () => {
+    // Real-world reproduction from the 2026-05-25 chiafarmer log: local
+    // detected a 1-block reorg at 8773694; Coinset detected at the same
+    // height with depth=1, max_depth=3 (chain advanced 2 blocks past
+    // observed peak during the reorg). Without settle_at, the widened
+    // Coinset high=8773696 makes its release threshold 8773698, while
+    // local's is 8773696, so they release in different windows and never
+    // get paired. With settle_at = observed top (8773694) for both, they
+    // settle together and the match loop pairs them.
+    const dispatched: DispatchOutcome[] = [];
+    const c = createDualSource('both', (o) => {
+      dispatched.push(o);
+    });
+
+    // 11:35:19 — local detects, notes its peak.
+    c.noteReorg({
+      source: 'local',
+      low: 8773694,
+      high: 8773694,
+      settle_at: 8773694,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T03:35:19.162Z',
+    });
+    await c.notePeak('local', 8773694);
+    expect(dispatched).toHaveLength(0); // gate=min(?, 8773694), coinset still null
+
+    // 11:35:49 — coinset detects (depth=1, max_depth=3, peak=8773696) and
+    // hands off to the coordinator. Note: noteReorg fires BEFORE notePeak
+    // in the new ordering. The Coinset SourceEvent's high is widened to
+    // 8773696 (matching range) but settle_at stays at the observed top.
+    c.noteReorg({
+      source: 'coinset',
+      low: 8773694,
+      high: 8773694 + (3 - 1), // widened: 8773696
+      settle_at: 8773694,       // observed top, un-widened
+      depth: 1,
+      max_depth: 3,
+      detected_at_iso: '2026-05-25T03:35:49.993Z',
+    });
+    await c.notePeak('coinset', 8773696);
+    // gate = min(coinset=8773696, local=8773694) = 8773694
+    // both events: settle_at + 2 = 8773696, NOT ≤ 8773694 → stay pending
+    expect(dispatched).toHaveLength(0);
+
+    // Next local poll advances local peak to 8773696. Now both settle.
+    await c.notePeak('local', 8773696);
+    // gate = 8773696, both events settle_at + 2 = 8773696 → release together.
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.kind).toBe('matched');
   });
 
   it('pending buffer is bounded; oldest event is dropped at the cap', () => {

@@ -17,8 +17,20 @@ export type SourceEvent = {
   source: Source;
   /** Lowest height in the cluster (inclusive). */
   low: number;
-  /** Highest height in the cluster (inclusive). */
+  /** Highest height that *might* be part of the cluster (inclusive). For
+   *  Coinset events this is widened by max_depth - depth to capture
+   *  unobserved heights above the observed top, so matches() can pair this
+   *  event with a local detection anywhere in [low..high]. */
   high: number;
+  /** Highest height that we OBSERVED change at. For local events this
+   *  equals `high` (local is always exact). For Coinset events this is the
+   *  un-widened observed cluster top — the height past which the chain is
+   *  "finalized" enough to safely declare the reorg over. Drives release
+   *  timing: an event releases when min(peers' peaks) ≥ settle_at + 2.
+   *  Using settle_at rather than high here keeps coinset and local events
+   *  for the same reorg releasing in the same window, which is necessary
+   *  for the match loop to pair them. */
+  settle_at: number;
   /** Lower bound on depth (observed cluster size). */
   depth: number;
   /** Upper bound on depth. Equal to `depth` when fully observed. */
@@ -151,7 +163,11 @@ export function createDualSource(mode: DualSourceMode, dispatch: DispatchHook) {
     const stillPending: SourceEvent[] = [];
     const released: SourceEvent[] = [];
     for (const evt of state.pending) {
-      if (evt.high + 2 <= gate) released.push(evt);
+      // Use settle_at, not high — for Coinset events `high` is widened by
+      // (max_depth - depth) so a local counterpart with the same observed
+      // top would release sooner and miss the pairing. settle_at is the
+      // un-widened observed top, so both sources settle in the same window.
+      if (evt.settle_at + 2 <= gate) released.push(evt);
       else stillPending.push(evt);
     }
     state.pending = stillPending;

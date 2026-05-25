@@ -443,6 +443,8 @@ export function consolidateCoinsetBatch(events: ReorgEvent[]): SourceEvent[] {
         source: 'coinset',
         low: first.height,
         high: last.height + (last.max_depth - last.depth),
+        // settle_at is the un-widened observed top — see SourceEvent docstring.
+        settle_at: last.height,
         depth: first.depth,
         max_depth: first.max_depth,
         detected_at_iso: first.detected_at,
@@ -472,6 +474,8 @@ export function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): Sou
     source,
     low: evt.height,
     high: evt.height + (evt.max_depth - evt.depth),
+    // settle_at is the actual observed height — see SourceEvent docstring.
+    settle_at: evt.height,
     depth: evt.depth,
     max_depth: evt.max_depth,
     detected_at_iso: evt.detected_at,
@@ -487,8 +491,9 @@ function localReorgToSourceEvent(r: LocalReorg & { detected_at_iso: string }): S
     source: 'local',
     low: r.low,
     high: r.high,
+    settle_at: r.high, // local is exact; settle_at == observed top
     depth: r.depth,
-    max_depth: r.depth, // local is exact
+    max_depth: r.depth,
     detected_at_iso: r.detected_at_iso,
     ts_low_unix: r.ts_low_unix,
     ts_high_unix: r.ts_high_unix,

@@ -208,10 +208,6 @@ export async function _pollOnce(): Promise<void> {
     // before reaching here) don't advance this — that's the whole point.
     state.last_observed_peak = peak;
 
-    // Dual-source hook: tell the coordinator about our latest peak so it can
-    // release buffered events whose `high + 2` is now ≤ peak.
-    if (state.onPeak !== null) state.onPeak(peak);
-
     // If we detected a re-org whose top reaches our previous *observed* peak
     // AND the chain has advanced beyond it, the actual cascade may have
     // extended into heights we never observed (no baseline to compare). The
@@ -239,14 +235,16 @@ export async function _pollOnce(): Promise<void> {
       return true;
     });
 
-    // Dual-source hook: forward this poll's batch to the coordinator. The
-    // inline per-recipient dispatch below still runs, but in dual-source mode
-    // the CLI passes alert_recipients=[] so it's a no-op. We hand off the
-    // batch as a unit (not per-event) so the CLI can consolidate consecutive
-    // heights into a single cluster-level SourceEvent.
+    // Dual-source hooks. ORDER MATTERS: onReorgBatch must fire BEFORE onPeak.
+    // notePeak triggers releaseSettled in the coordinator, so if onPeak fired
+    // first, a peak advance large enough to release a buffered counterpart
+    // event from the other source would dispatch it as single-source-only
+    // before this poll's new reorg is added to the buffer — producing two
+    // separate outcomes for the same logical reorg.
     if (state.onReorgBatch !== null && newReorgsForAlert.length > 0) {
       state.onReorgBatch(newReorgsForAlert);
     }
+    if (state.onPeak !== null) state.onPeak(peak);
 
     // Send one batched email per recipient containing all eligible reorgs from this poll.
     // Filter on max_depth (worst-case true depth) so a re-org with uncertain
