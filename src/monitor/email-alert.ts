@@ -105,14 +105,24 @@ export async function sendReorgAlert(
 
   const blockSections = sorted
     .map((reorg, i) => {
-      const recordJson = JSON.stringify(reorg.old_block_record, null, 2)
-        .split('\n')
-        .map((line) => `  ${line}`)
-        .join('\n');
+      const isTxBlock =
+        (reorg.old_block_record as { timestamp?: unknown }).timestamp != null;
       const depthLine =
         reorg.depth === reorg.max_depth
           ? `  Depth:        ${reorg.depth} block(s) (size of the re-org cascade)`
           : `  Depth:        ${reorg.depth}-${reorg.max_depth} block(s) (observed cascade is ${reorg.depth}; up to ${reorg.max_depth - reorg.depth} more block(s) above were never compared)`;
+      // Non-tx blocks carry no timestamp and nothing else worth dumping —
+      // skip the JSON body and just note the block type to keep the email
+      // compact.
+      const origBlockSection = isTxBlock
+        ? [
+            `  The original block was a tx block with the following contents:`,
+            JSON.stringify(reorg.old_block_record, null, 2)
+              .split('\n')
+              .map((line) => `  ${line}`)
+              .join('\n'),
+          ]
+        : [`  The original block was a non-tx block (no canonical contents available).`];
       return [
         `Block ${i + 1}:`,
         ``,
@@ -123,8 +133,7 @@ export async function sendReorgAlert(
         `  Behind peak:  ${reorg.blocks_from_peak} block(s) from current peak (how long ago)`,
         `  Detected:     ${reorg.detected_at}`,
         ``,
-        `  The original block was a ${(reorg.old_block_record as { timestamp?: unknown }).timestamp != null ? 'tx' : 'non-tx'} block with the following contents:`,
-        recordJson,
+        ...origBlockSection,
         ``,
         `  See https://spacescan.io/block/${reorg.height} for the canonical block contents.`,
       ].join('\n');

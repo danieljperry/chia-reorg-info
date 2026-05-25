@@ -1059,13 +1059,14 @@ describe('reorg monitor detection logic', () => {
     expect(call.text).toContain('"timestamp": 1700000000');
     expect(call.text).toContain('"fees": 100000000000');
 
-    // Block 2 (height 200) original was non-tx.
+    // Block 2 (height 200) original was non-tx — body omits the JSON dump
+    // and just states the block type.
     expect(call.text).toContain('a'.repeat(64)); // original hash of block 200
     expect(call.text).toContain(
-      'The original block was a non-tx block with the following contents:'
+      'The original block was a non-tx block (no canonical contents available).'
     );
-    expect(call.text).toContain('"timestamp": null');
-    expect(call.text).toContain('"fees": null');
+    expect(call.text).not.toContain('"timestamp": null');
+    expect(call.text).not.toContain('"fees": null');
 
     // Both spacescan links present.
     expect(call.text).toContain('spacescan.io/block/200');

@@ -102,6 +102,49 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).not.toContain('unavailable');
   });
 
+  it('email body for a non-tx block omits the JSON dump and states the block type', async () => {
+    mockSendMail.mockClear();
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T02:45:27.985Z',
+      ts_high_unix: null, // non-tx block → timestamp null
+      old_header_hash: 'aa',
+      new_header_hash: 'bb',
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 100, {});
+    const body = (mockSendMail.mock.calls[0]?.[0] as { text: string }).text;
+    expect(body).toContain('The original block was a non-tx block (no canonical contents available).');
+    // No JSON dump for the record.
+    expect(body).not.toMatch(/^ {2}\{$/m);
+    expect(body).not.toContain('"timestamp"');
+  });
+
+  it('email body for a tx block keeps the JSON dump of the record', async () => {
+    mockSendMail.mockClear();
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T02:45:27.985Z',
+      ts_high_unix: 1_748_097_540, // tx block → timestamp populated
+      old_header_hash: 'aa',
+      new_header_hash: 'bb',
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 100, {});
+    const body = (mockSendMail.mock.calls[0]?.[0] as { text: string }).text;
+    expect(body).toContain('The original block was a tx block with the following contents:');
+    expect(body).toContain('"timestamp"');
+    expect(body).toContain('1748097540');
+  });
+
   it('local source with null hashes falls back to "(unavailable — local DB detection)"', () => {
     const localSource = {
       source: 'local' as const,
