@@ -60,6 +60,17 @@ ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
   --recipient you@example.com:1 \
   --smtp-env-file /etc/chia-reorg-info/smtp.env \
   --log-file /var/log/chia-reorg-monitor/reorg_monitor.log
+# To use the local DB or both sources, add e.g.:
+#   --source both \
+#   --db-path /var/lib/chia-reorg/blockchain_v2_mainnet.sqlite \
+# Use an ABSOLUTE path (systemd does not expand ~ or $HOME), AND make sure
+# the DB lives somewhere the chia-reorg user can read. Two gotchas:
+#   1. ProtectHome=true (below) hides /home from this service entirely,
+#      so a DB under /home/<you>/.chia/... will not be visible even if
+#      file perms allow it. Keep the DB outside /home.
+#   2. Even without ProtectHome, parent dirs like /home/<you>/ (0750)
+#      block lookup for the chia-reorg user. Verify with:
+#        sudo -u chia-reorg stat /path/to/blockchain_v2_mainnet.sqlite
 Restart=on-failure
 RestartSec=10
 

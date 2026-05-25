@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +57,27 @@ const DEFAULTS = {
 };
 
 const SOURCES: readonly Source[] = ['coinset', 'local', 'both'];
+
+// Returns null when the DB at `path` can be opened for reading by this process,
+// otherwise a short reason suitable for surfacing to the user.
+export function checkDbPathReadable(path: string): string | null {
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return `path does not exist (note: systemd does not expand ~ or $HOME in ExecStart — use an absolute path)`;
+    if (code === 'EACCES') return `cannot stat path — a parent directory blocks lookup for this user (uid=${process.getuid?.() ?? '?'})`;
+    return `stat failed (${code ?? 'unknown'}): ${safeMessage(err)}`;
+  }
+  if (!stat.isFile()) return `path is not a regular file`;
+  try {
+    accessSync(path, fsConstants.R_OK);
+  } catch {
+    return `file exists but is not readable by this user (uid=${process.getuid?.() ?? '?'}) — check file permissions`;
+  }
+  return null;
+}
 
 function parseIntegerFlag(name: string, raw: string, min: number, max: number): number {
   const n = Number(raw);
@@ -256,12 +277,18 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
     logSmtpConfig();
   }
 
-  // Validate --db-path when source includes local.
+  // Validate --db-path when source includes local. Distinguish "can't see it"
+  // (lookup blocked by parent-directory permissions, broken symlink, or wrong
+  // path) from "can see it but can't read it" (file perms too tight for the
+  // process UID) — they have different fixes and the old combined error left
+  // users guessing.
   if (args.source === 'local' || args.source === 'both') {
-    if (!existsSync(args.dbPath)) {
-      log('error', '--db-path not readable', { db_path: args.dbPath });
+    const dbError = checkDbPathReadable(args.dbPath);
+    if (dbError !== null) {
+      log('error', '--db-path check failed', { db_path: args.dbPath, reason: dbError });
       process.stderr.write(
-        `Error: --source=${args.source} requires a readable DB at ${args.dbPath}\n` +
+        `Error: --source=${args.source} cannot use ${args.dbPath}\n` +
+          `Reason: ${dbError}\n` +
           `Set --db-path, set CHIA_DB, or use --source=coinset.\n`
       );
       return 2;

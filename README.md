@@ -309,6 +309,19 @@ sudo systemctl daemon-reload
 
 `/var/log/chia-reorg-monitor/` and `/etc/chia-reorg-info/` are auto-created by systemd with the right ownership thanks to `LogsDirectory=` / `ConfigurationDirectory=` in the unit.
 
+### Using `--source local` or `--source both` under systemd
+
+Two things commonly bite when adding `--db-path` to a service unit:
+
+1. **Use an absolute path.** systemd does **not** expand `~` or `$HOME` inside `ExecStart=`. A literal `~/.chia/...` is passed through as the string `~/.chia/...` and fails the readability check. Write the full path, e.g. `/home/<you>/.chia/mainnet/db/blockchain_v2_mainnet.sqlite`.
+2. **Watch the running user.** The system-level unit runs as the unprivileged `chia-reorg` user. Even when the SQLite file itself is `0644`, a parent directory like `/home/<you>/` (typically `0750`) blocks the lookup, and the monitor fails with `--db-path check failed`. Verify by running the same `stat` as the service user:
+   ```bash
+   sudo -u chia-reorg stat /home/<you>/.chia/mainnet/db/blockchain_v2_mainnet.sqlite
+   ```
+   If that fails with permission-denied, either use the user-level unit (runs as your own UID — already has access to your home), or relocate the DB to a path the `chia-reorg` user can read (e.g. `/var/lib/chia-reorg/blockchain_v2_mainnet.sqlite`, perhaps as a read-only bind mount or copy refreshed on a timer). Note that the system-unit's `ProtectHome=true` hardening also hides `/home` from the service entirely — that's another reason to keep the DB outside `/home` for system-level installs.
+
+The error message distinguishes "path does not exist" (likely cause #1) from "not readable by this user" (likely cause #2) so you can tell which one you're hitting.
+
 ### macOS (launchd) and Windows (NSSM)
 
 See [`service/com.chia-reorg-info.reorg-monitor.plist`](service/com.chia-reorg-info.reorg-monitor.plist) and [`service/install-windows.ps1`](service/install-windows.ps1) — same shape, platform-specific install commands documented inline.

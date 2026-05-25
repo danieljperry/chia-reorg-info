@@ -34,6 +34,13 @@ ExecStart=<node-bin> <install-path>/dist/index.js reorg_monitor \
   --network mainnet \
   --recipient you@example.com:1 \
   --smtp-env-file <smtp-env-file>
+# To use the local DB or both sources, add e.g.:
+#   --source both \
+#   --db-path /home/<you>/.chia/mainnet/db/blockchain_v2_mainnet.sqlite \
+# Use an ABSOLUTE path: systemd does not expand ~ or $HOME in ExecStart.
+# This is a user-mode service so it runs as your UID and has access to your
+# home directory; if you switch to the system-level template, see its notes
+# on parent-dir permissions and ProtectHome=true hiding /home.
 Restart=on-failure
 RestartSec=10
 
