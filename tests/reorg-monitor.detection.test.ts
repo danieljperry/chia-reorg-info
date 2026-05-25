@@ -48,15 +48,15 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(100, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(98, 'x'.repeat(64)),
-      makeBlockRecord(99, 'y'.repeat(64)),
+      makeBlockRecord(98, '8'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'y'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
@@ -72,13 +72,13 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(100, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(98, 'x'.repeat(64)),
-      makeBlockRecord(99, 'y'.repeat(64)),
+      makeBlockRecord(98, '8'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
-    const newHash99 = 'z'.repeat(64);
+    const newHash99 = 'd'.repeat(64);
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
       makeBlockRecord(99, newHash99),
@@ -90,7 +90,7 @@ describe('reorg monitor detection logic', () => {
     const { reorgs } = getStatus();
     expect(reorgs).toHaveLength(1);
     expect(reorgs[0]!.height).toBe(99);
-    expect(reorgs[0]!.old_header_hash).toBe('y'.repeat(64));
+    expect(reorgs[0]!.old_header_hash).toBe('9'.repeat(64));
     expect(reorgs[0]!.new_header_hash).toBe(newHash99);
     expect(reorgs[0]!.depth).toBe(1);
     expect(reorgs[0]!.blocks_from_peak).toBe(2);
@@ -107,6 +107,31 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(201, 'b'.repeat(64));
     mockBlockRecords([makeBlockRecord(200, hash), makeBlockRecord(201, 'b'.repeat(64))]);
+    await _pollOnce();
+
+    expect(getStatus().reorgs).toHaveLength(0);
+  });
+
+  it('skips blocks whose RPC-supplied header_hash is malformed (not valid hex)', async () => {
+    // Defense in depth: if the RPC response contains a non-hex hash (e.g.
+    // tampered response, MITM, or unexpected upstream change), the block
+    // is skipped rather than letting the bad string flow into observations
+    // and emails. Subsequent polls will re-fetch and detect the change
+    // cleanly if the value normalizes.
+    startMonitor({ poll_interval_seconds: 60, lookback_blocks: 2, network: 'mainnet' });
+    stopMonitor();
+
+    mockPeak(100, 'a'.repeat(64));
+    mockBlockRecords([makeBlockRecord(100, 'a'.repeat(64))]);
+    await _pollOnce();
+
+    // Second poll: same height with a malformed hash. The block should be
+    // skipped entirely — no reorg recorded, observation NOT updated.
+    mockPeak(101, 'b'.repeat(64));
+    mockBlockRecords([
+      makeBlockRecord(100, 'not-hex!' + 'a'.repeat(56)),
+      makeBlockRecord(101, 'b'.repeat(64)),
+    ]);
     await _pollOnce();
 
     expect(getStatus().reorgs).toHaveLength(0);
@@ -240,7 +265,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORGED'.padEnd(64, '0')),
+      makeBlockRecord(100, 'aaa'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -301,7 +326,7 @@ describe('reorg monitor detection logic', () => {
     // Now let the deferred block_records response arrive with a reorg.
     resolveBlocks({
       block_records: [
-        makeBlockRecord(100, 'REORGED'.padEnd(64, '0')),
+        makeBlockRecord(100, 'aaa'.padEnd(64, '0')),
         makeBlockRecord(101, 'b'.repeat(64)),
       ],
     });
@@ -352,14 +377,14 @@ describe('reorg monitor detection logic', () => {
 
       mockPeak(900, 'a'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(899, 'x'.repeat(64)),
+        makeBlockRecord(899, '8'.repeat(64)),
         makeBlockRecord(900, 'a'.repeat(64)),
       ]);
       await _pollOnce();
 
       mockPeak(901, 'b'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(899, 'z'.repeat(64)),
+        makeBlockRecord(899, 'd'.repeat(64)),
         makeBlockRecord(900, 'a'.repeat(64)),
         makeBlockRecord(901, 'b'.repeat(64)),
       ]);
@@ -375,7 +400,7 @@ describe('reorg monitor detection logic', () => {
       expect(contents).toContain('Sending re-org alert email');
       expect(contents).toContain('subject=');
       expect(contents).toContain('Peak height at detection: 901');
-      expect(contents).toContain('z'.repeat(64));
+      expect(contents).toContain('d'.repeat(64));
       expect(contents).toContain('Re-org alert email sent');
     } finally {
       await closeLogger();
@@ -393,12 +418,12 @@ describe('reorg monitor detection logic', () => {
     stopMonitor();
 
     mockPeak(500, 'a'.repeat(64));
-    mockBlockRecords([makeBlockRecord(499, 'x'.repeat(64)), makeBlockRecord(500, 'a'.repeat(64))]);
+    mockBlockRecords([makeBlockRecord(499, '8'.repeat(64)), makeBlockRecord(500, 'a'.repeat(64))]);
     await _pollOnce();
 
     mockPeak(501, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(499, 'z'.repeat(64)),
+      makeBlockRecord(499, 'd'.repeat(64)),
       makeBlockRecord(500, 'a'.repeat(64)),
       makeBlockRecord(501, 'b'.repeat(64)),
     ]);
@@ -410,8 +435,8 @@ describe('reorg monitor detection logic', () => {
     expect(call.to).toBe('user@example.com');
     expect(call.subject).toBe('Re-org of depth 1 detected on Chia mainnet');
     expect(call.text).toContain('Peak height at detection: 501');
-    expect(call.text).toContain('z'.repeat(64)); // new hash
-    expect(call.text).toContain('x'.repeat(64)); // old hash in header + block record
+    expect(call.text).toContain('d'.repeat(64)); // new hash
+    expect(call.text).toContain('8'.repeat(64)); // old hash in header + block record
     expect(call.text).toContain('The original block was a');
     expect(call.text).toContain('spacescan.io/block/499');
   });
@@ -426,7 +451,7 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(601, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(600, 'CHANGED'.padEnd(64, '0')),
+      makeBlockRecord(600, 'ccc'.padEnd(64, '0')),
       makeBlockRecord(601, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -452,7 +477,7 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(701, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(700, 'CHANGED'.padEnd(64, '0')),
+      makeBlockRecord(700, 'ccc'.padEnd(64, '0')),
       makeBlockRecord(701, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -475,15 +500,15 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(100, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(98, 'x'.repeat(64)),
-      makeBlockRecord(99, 'y'.repeat(64)),
+      makeBlockRecord(98, '8'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'z'.repeat(64)),
+      makeBlockRecord(99, 'd'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
@@ -515,9 +540,9 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(102, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'R1'.padEnd(64, '0')),
-      makeBlockRecord(100, 'R2'.padEnd(64, '0')),
-      makeBlockRecord(101, 'R3'.padEnd(64, '0')),
+      makeBlockRecord(99, 'ddd1'.padEnd(64, '0')),
+      makeBlockRecord(100, 'ddd2'.padEnd(64, '0')),
+      makeBlockRecord(101, 'ddd3'.padEnd(64, '0')),
       makeBlockRecord(102, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -538,8 +563,8 @@ describe('reorg monitor detection logic', () => {
     startMonitor({ poll_interval_seconds: 60, lookback_blocks: 5, network: 'mainnet' });
     stopMonitor();
 
-    const orig = (h: number) => `o${String(h).padStart(63, '0')}`;
-    const reorged = (h: number) => `r${String(h).padStart(63, '0')}`;
+    const orig = (h: number) => `a${String(h).padStart(63, '0')}`;
+    const reorged = (h: number) => `b${String(h).padStart(63, '0')}`;
 
     // Dynamic mock: returns whichever heights the monitor requests, and flips
     // 93..100 to their `reorged` hashes once reorgActive is set.
@@ -588,10 +613,10 @@ describe('reorg monitor detection logic', () => {
       // Establish observations 96..100 with prev_peak = 100.
       mockPeak(100, 'a'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(96, 'p'.repeat(64)),
-        makeBlockRecord(97, 'q'.repeat(64)),
-        makeBlockRecord(98, 'r'.repeat(64)),
-        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(96, '2'.repeat(64)),
+        makeBlockRecord(97, '3'.repeat(64)),
+        makeBlockRecord(98, '4'.repeat(64)),
+        makeBlockRecord(99, '5'.repeat(64)),
         makeBlockRecord(100, 'a'.repeat(64)),
       ]);
       await _pollOnce();
@@ -599,8 +624,8 @@ describe('reorg monitor detection logic', () => {
       // Chain advanced 3 blocks (during simulated skips) AND height 100 was re-orged.
       mockPeak(103, 'd'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(99, 's'.repeat(64)), // unchanged
-        makeBlockRecord(100, 'REORG'.padEnd(64, '0')), // changed → cluster_high = 100 = prev_peak
+        makeBlockRecord(99, '5'.repeat(64)), // unchanged
+        makeBlockRecord(100, 'bbb'.padEnd(64, '0')), // changed → cluster_high = 100 = prev_peak
         makeBlockRecord(101, 'b'.repeat(64)), // new
         makeBlockRecord(102, 'c'.repeat(64)), // new
         makeBlockRecord(103, 'd'.repeat(64)), // new
@@ -635,10 +660,10 @@ describe('reorg monitor detection logic', () => {
       // Poll 1: successful, observe 96..100.
       mockPeak(100, 'a'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(96, 'p'.repeat(64)),
-        makeBlockRecord(97, 'q'.repeat(64)),
-        makeBlockRecord(98, 'r'.repeat(64)),
-        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(96, '2'.repeat(64)),
+        makeBlockRecord(97, '3'.repeat(64)),
+        makeBlockRecord(98, '4'.repeat(64)),
+        makeBlockRecord(99, '5'.repeat(64)),
         makeBlockRecord(100, 'a'.repeat(64)),
       ]);
       await _pollOnce();
@@ -656,10 +681,10 @@ describe('reorg monitor detection logic', () => {
       // The warning must fire even though state.peak_height was already 102.
       mockPeak(103, 'c'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(99, 's'.repeat(64)), // unchanged
-        makeBlockRecord(100, 'REORG'.padEnd(64, '0')), // changed
-        makeBlockRecord(101, 'x'.repeat(64)), // new
-        makeBlockRecord(102, 'y'.repeat(64)), // new
+        makeBlockRecord(99, '5'.repeat(64)), // unchanged
+        makeBlockRecord(100, 'bbb'.padEnd(64, '0')), // changed
+        makeBlockRecord(101, '8'.repeat(64)), // new
+        makeBlockRecord(102, '9'.repeat(64)), // new
         makeBlockRecord(103, 'c'.repeat(64)), // new
       ]);
       await _pollOnce();
@@ -705,10 +730,10 @@ describe('reorg monitor detection logic', () => {
       // Poll 1: peak=100, observe 96..100. last_observed_peak = 100.
       mockPeak(100, 'a'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(96, 'p'.repeat(64)),
-        makeBlockRecord(97, 'q'.repeat(64)),
-        makeBlockRecord(98, 'r'.repeat(64)),
-        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(96, '2'.repeat(64)),
+        makeBlockRecord(97, '3'.repeat(64)),
+        makeBlockRecord(98, '4'.repeat(64)),
+        makeBlockRecord(99, '5'.repeat(64)),
         makeBlockRecord(100, 'a'.repeat(64)),
       ]);
       await _pollOnce();
@@ -718,8 +743,8 @@ describe('reorg monitor detection logic', () => {
       // True depth could be 1, 2, 3, or 4 → max_depth = 1 + 3 = 4.
       mockPeak(103, 'd'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(99, 's'.repeat(64)),
-        makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+        makeBlockRecord(99, '5'.repeat(64)),
+        makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
         makeBlockRecord(101, 'b'.repeat(64)),
         makeBlockRecord(102, 'c'.repeat(64)),
         makeBlockRecord(103, 'd'.repeat(64)),
@@ -780,22 +805,22 @@ describe('reorg monitor detection logic', () => {
 
       mockPeak(100, 'a'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(96, 'p'.repeat(64)),
-        makeBlockRecord(97, 'q'.repeat(64)),
-        makeBlockRecord(98, 'r'.repeat(64)),
-        makeBlockRecord(99, 's'.repeat(64)),
+        makeBlockRecord(96, '2'.repeat(64)),
+        makeBlockRecord(97, '3'.repeat(64)),
+        makeBlockRecord(98, '4'.repeat(64)),
+        makeBlockRecord(99, '5'.repeat(64)),
         makeBlockRecord(100, 'a'.repeat(64)),
       ]);
       await _pollOnce();
 
       // Same peak height, but heights 99 and 100 got new hashes (block swap).
-      mockPeak(100, 'A'.repeat(64));
+      mockPeak(100, 'c'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(96, 'p'.repeat(64)),
-        makeBlockRecord(97, 'q'.repeat(64)),
-        makeBlockRecord(98, 'r'.repeat(64)),
-        makeBlockRecord(99, 'S'.repeat(64)),
-        makeBlockRecord(100, 'A'.repeat(64)),
+        makeBlockRecord(96, '2'.repeat(64)),
+        makeBlockRecord(97, '3'.repeat(64)),
+        makeBlockRecord(98, '4'.repeat(64)),
+        makeBlockRecord(99, '6'.repeat(64)),
+        makeBlockRecord(100, 'c'.repeat(64)),
       ]);
       await _pollOnce();
       await closeLogger();
@@ -823,15 +848,15 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(100, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(98, 'x'.repeat(64)),
-      makeBlockRecord(99, 'y'.repeat(64)),
+      makeBlockRecord(98, '8'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'z'.repeat(64)),
+      makeBlockRecord(99, 'd'.repeat(64)),
       makeBlockRecord(100, 'a'.repeat(64)),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
@@ -865,8 +890,8 @@ describe('reorg monitor detection logic', () => {
     // Second poll: heights 99 and 100 both reorged in the same poll.
     mockPeak(102, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'REORG1'.padEnd(64, '0')),
-      makeBlockRecord(100, 'REORG2'.padEnd(64, '0')),
+      makeBlockRecord(99, 'eee1'.padEnd(64, '0')),
+      makeBlockRecord(100, 'eee2'.padEnd(64, '0')),
       makeBlockRecord(101, 'a'.repeat(64)),
       makeBlockRecord(102, 'b'.repeat(64)),
     ]);
@@ -881,8 +906,8 @@ describe('reorg monitor detection logic', () => {
     expect(call.subject).toBe('Re-org of depth 2 detected on Chia mainnet');
     expect(call.text).toContain('Block 1:');
     expect(call.text).toContain('Block 2:');
-    expect(call.text).toContain('REORG1'.padEnd(64, '0').toLowerCase());
-    expect(call.text).toContain('REORG2'.padEnd(64, '0').toLowerCase());
+    expect(call.text).toContain('eee1'.padEnd(64, '0').toLowerCase());
+    expect(call.text).toContain('eee2'.padEnd(64, '0').toLowerCase());
   });
 
   it('uses a cluster-count subject when re-orgs are non-consecutive', async () => {
@@ -907,9 +932,9 @@ describe('reorg monitor detection logic', () => {
     // Heights 99 and 101 both change — non-consecutive.
     mockPeak(104, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'REORG1'.padEnd(64, '0')),
+      makeBlockRecord(99, 'eee1'.padEnd(64, '0')),
       makeBlockRecord(100, '2'.repeat(64)), // unchanged
-      makeBlockRecord(101, 'REORG2'.padEnd(64, '0')),
+      makeBlockRecord(101, 'eee2'.padEnd(64, '0')),
       makeBlockRecord(102, '4'.repeat(64)), // unchanged
       makeBlockRecord(104, 'b'.repeat(64)),
     ]);
@@ -943,8 +968,8 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(105, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(102, 'REORG1'.padEnd(64, '0')), // depth = 105-102 = 3
-      makeBlockRecord(103, 'REORG2'.padEnd(64, '0')), // depth = 105-103 = 2
+      makeBlockRecord(102, 'eee1'.padEnd(64, '0')), // depth = 105-102 = 3
+      makeBlockRecord(103, 'eee2'.padEnd(64, '0')), // depth = 105-103 = 2
       makeBlockRecord(104, 'a'.repeat(64)),
       makeBlockRecord(105, 'b'.repeat(64)),
     ]);
@@ -1086,13 +1111,13 @@ describe('reorg monitor detection logic', () => {
 
     // Establish heights 99 and 100 as consecutive reorgs (peak=101, depths 2 and 1).
     mockPeak(100, 'a'.repeat(64));
-    mockBlockRecords([makeBlockRecord(99, 'x'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
+    mockBlockRecords([makeBlockRecord(99, '8'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
     await _pollOnce();
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'y'.repeat(64)),
-      makeBlockRecord(100, 'z'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
+      makeBlockRecord(100, 'd'.repeat(64)),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1128,9 +1153,9 @@ describe('reorg monitor detection logic', () => {
     // Heights 100 and 102 change — not consecutive.
     mockPeak(105, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'R1'.padEnd(64, '0')),
+      makeBlockRecord(100, 'ddd1'.padEnd(64, '0')),
       makeBlockRecord(101, '2'.repeat(64)),
-      makeBlockRecord(102, 'R2'.padEnd(64, '0')),
+      makeBlockRecord(102, 'ddd2'.padEnd(64, '0')),
       makeBlockRecord(103, '4'.repeat(64)),
       makeBlockRecord(105, 'b'.repeat(64)),
     ]);
@@ -1160,7 +1185,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1187,7 +1212,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1214,7 +1239,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1241,7 +1266,7 @@ describe('reorg monitor detection logic', () => {
     stopMonitor();
 
     mockPeak(100, 'a'.repeat(64));
-    mockBlockRecords([makeBlockRecord(99, 'x'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
+    mockBlockRecords([makeBlockRecord(99, '8'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
     await _pollOnce();
 
     // Same hashes on second poll — no change.
@@ -1265,12 +1290,12 @@ describe('reorg monitor detection logic', () => {
     stopMonitor();
 
     mockPeak(100, 'a'.repeat(64));
-    mockBlockRecords([makeBlockRecord(99, 'x'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
+    mockBlockRecords([makeBlockRecord(99, '8'.repeat(64)), makeBlockRecord(100, 'a'.repeat(64))]);
     await _pollOnce();
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORGED'.padEnd(64, '0')), // depth = 101-100 = 1
+      makeBlockRecord(100, 'aaa'.padEnd(64, '0')), // depth = 101-100 = 1
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1294,15 +1319,15 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(101, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'x'.repeat(64)),
-      makeBlockRecord(100, 'y'.repeat(64)),
+      makeBlockRecord(99, '8'.repeat(64)),
+      makeBlockRecord(100, '9'.repeat(64)),
       makeBlockRecord(101, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
     mockPeak(102, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORGED'.padEnd(64, '0')), // depth = 102-100 = 2
+      makeBlockRecord(100, 'aaa'.padEnd(64, '0')), // depth = 102-100 = 2
       makeBlockRecord(101, 'a'.repeat(64)),
       makeBlockRecord(102, 'b'.repeat(64)),
     ]);
@@ -1327,18 +1352,18 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(102, 'a'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(99, 'w'.repeat(64)),
-      makeBlockRecord(100, 'x'.repeat(64)),
-      makeBlockRecord(101, 'y'.repeat(64)),
+      makeBlockRecord(99, '7'.repeat(64)),
+      makeBlockRecord(100, '8'.repeat(64)),
+      makeBlockRecord(101, '9'.repeat(64)),
       makeBlockRecord(102, 'a'.repeat(64)),
     ]);
     await _pollOnce();
 
     mockPeak(103, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'R1'.padEnd(64, '0')),
-      makeBlockRecord(101, 'R2'.padEnd(64, '0')),
-      makeBlockRecord(102, 'R3'.padEnd(64, '0')),
+      makeBlockRecord(100, 'ddd1'.padEnd(64, '0')),
+      makeBlockRecord(101, 'ddd2'.padEnd(64, '0')),
+      makeBlockRecord(102, 'ddd3'.padEnd(64, '0')),
       makeBlockRecord(103, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1452,7 +1477,7 @@ describe('reorg monitor detection logic', () => {
 
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1479,7 +1504,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1517,7 +1542,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();
@@ -1572,30 +1597,30 @@ describe('reorg monitor detection logic', () => {
     expect(mockSendMail).not.toHaveBeenCalled();
 
     // Poll 2: height 100 flips to B → reorg event (100, B). Alert #1.
-    mockPeak(101, 'p'.repeat(64));
-    mockBlockRecords([makeBlockRecord(100, hashB), makeBlockRecord(101, 'p'.repeat(64))]);
+    mockPeak(101, '2'.repeat(64));
+    mockBlockRecords([makeBlockRecord(100, hashB), makeBlockRecord(101, '2'.repeat(64))]);
     await _pollOnce();
     await Promise.resolve();
     expect(mockSendMail).toHaveBeenCalledTimes(1);
 
     // Poll 3: height 100 flips back to A → reorg event (100, A). Alert #2 (new pair).
-    mockPeak(102, 'q'.repeat(64));
+    mockPeak(102, '3'.repeat(64));
     mockBlockRecords([
       makeBlockRecord(100, hashA),
-      makeBlockRecord(101, 'p'.repeat(64)),
-      makeBlockRecord(102, 'q'.repeat(64)),
+      makeBlockRecord(101, '2'.repeat(64)),
+      makeBlockRecord(102, '3'.repeat(64)),
     ]);
     await _pollOnce();
     await Promise.resolve();
     expect(mockSendMail).toHaveBeenCalledTimes(2);
 
     // Poll 4: height 100 thrashes back to B → reorg event (100, B) — DEBOUNCED.
-    mockPeak(103, 'r'.repeat(64));
+    mockPeak(103, '4'.repeat(64));
     mockBlockRecords([
       makeBlockRecord(100, hashB),
-      makeBlockRecord(101, 'p'.repeat(64)),
-      makeBlockRecord(102, 'q'.repeat(64)),
-      makeBlockRecord(103, 'r'.repeat(64)),
+      makeBlockRecord(101, '2'.repeat(64)),
+      makeBlockRecord(102, '3'.repeat(64)),
+      makeBlockRecord(103, '4'.repeat(64)),
     ]);
     await _pollOnce();
     await Promise.resolve();
@@ -1670,7 +1695,7 @@ describe('reorg monitor detection logic', () => {
       await _pollOnce();
       mockPeak(101, 'b'.repeat(64));
       mockBlockRecords([
-        makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+        makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
         makeBlockRecord(101, 'b'.repeat(64)),
       ]);
       await _pollOnce();
@@ -1703,7 +1728,7 @@ describe('reorg monitor detection logic', () => {
     await _pollOnce();
     mockPeak(101, 'b'.repeat(64));
     mockBlockRecords([
-      makeBlockRecord(100, 'REORG'.padEnd(64, '0')),
+      makeBlockRecord(100, 'bbb'.padEnd(64, '0')),
       makeBlockRecord(101, 'b'.repeat(64)),
     ]);
     await _pollOnce();

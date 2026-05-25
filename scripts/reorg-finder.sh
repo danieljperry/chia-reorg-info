@@ -533,6 +533,9 @@ if [[ "$JSON_OUT" == "true" ]]; then
       "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
     new_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
       "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
+    # Safe to wrap in literal quotes without escaping: lower(hex(...)) returns
+    # only [0-9a-f], no JSON metacharacters. DO NOT use this pattern with
+    # other column types — change to a proper JSON-escaper if you do.
     if [[ -n "$old_hash" ]]; then old_hash_json="\"$old_hash\""; else old_hash_json="null"; fi
     if [[ -n "$new_hash" ]]; then new_hash_json="\"$new_hash\""; else new_hash_json="null"; fi
     if [[ -n "$json_reorgs" ]]; then json_reorgs+=","; fi

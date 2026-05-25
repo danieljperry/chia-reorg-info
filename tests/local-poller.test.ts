@@ -249,6 +249,44 @@ describe('validateLocalScanResult', () => {
     expect(result?.reorgs[0]?.new_hash).toBeNull();
   });
 
+  it('rejects a non-hex string old_hash (defense in depth against tampered DB)', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        // 64 chars but contains a non-hex char (g). Could otherwise flow
+        // into the email body verbatim.
+        old_hash: 'g' + 'a'.repeat(63),
+        new_hash: null,
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
+  it('rejects a too-short old_hash (not 64 hex chars)', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_hash: 'abcd',
+        new_hash: null,
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
+  it('rejects a hash containing newline/control chars', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_hash: 'a'.repeat(31) + '\n' + 'a'.repeat(32),
+        new_hash: null,
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
   it('rejects non-string, non-null old_hash', () => {
     const v = {
       ...valid,

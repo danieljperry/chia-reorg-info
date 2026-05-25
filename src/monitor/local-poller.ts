@@ -7,6 +7,7 @@
 // generation counter so an in-flight spawn can bail before invoking the hook.
 
 import { spawn } from 'node:child_process';
+import { isHex32 } from '../chia/hex.js';
 import { log } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
 
@@ -96,11 +97,15 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
     if (e.ts_low_unix !== null && !isNonNegInt(e.ts_low_unix)) return null;
     if (e.ts_high_unix !== null && !isNonNegInt(e.ts_high_unix)) return null;
     // Hash fields are optional (older scripts don't emit them). When present
-    // they must be a string or null; anything else fails validation.
+    // they must be either null or a valid 64-char SHA-256 hex string.
+    // Stricter than just `typeof string` because these values flow verbatim
+    // into the email body — defense in depth against a tampered DB or
+    // script returning attacker-influenced strings (newlines, control chars,
+    // etc.) that could mislead the recipient.
     const old_hash = e.old_hash === undefined ? null : e.old_hash;
     const new_hash = e.new_hash === undefined ? null : e.new_hash;
-    if (old_hash !== null && typeof old_hash !== 'string') return null;
-    if (new_hash !== null && typeof new_hash !== 'string') return null;
+    if (old_hash !== null && (typeof old_hash !== 'string' || !isHex32(old_hash))) return null;
+    if (new_hash !== null && (typeof new_hash !== 'string' || !isHex32(new_hash))) return null;
     reorgs.push({
       low: e.low,
       high: e.high,

@@ -1,6 +1,6 @@
 import { get_blockchain_state, get_block_records } from 'chia-agent/api/rpc/full_node/index.js';
 import { getAgent } from '../coinset/agent.js';
-import { stripHexPrefix } from '../chia/hex.js';
+import { isHex32, stripHexPrefix } from '../chia/hex.js';
 import { Network } from '../network.js';
 import { log } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
@@ -131,6 +131,12 @@ export async function _pollOnce(): Promise<void> {
       const prev = state.observations.get(lowestFetched);
       if (prev === undefined) break;
       const currentHash = stripHexPrefix(lowestRec.header_hash).toLowerCase();
+      if (!isHex32(currentHash)) {
+        log('warn', 'Skipping block with malformed header_hash during walk-down', {
+          height: lowestFetched,
+        });
+        break;
+      }
       if (prev.hash === currentHash) break;
 
       const newLowest = Math.max(0, lowestFetched - state.lookback_blocks);
@@ -150,6 +156,15 @@ export async function _pollOnce(): Promise<void> {
     const rawReorgs: RawReorg[] = [];
     for (const block of allRecords) {
       const currentHash = stripHexPrefix(block.header_hash).toLowerCase();
+      if (!isHex32(currentHash)) {
+        // Defensive: a malformed hash from the RPC response would otherwise
+        // flow into observations + emails. Skip this block and don't update
+        // observations so the next poll re-fetches it cleanly.
+        log('warn', 'Skipping block with malformed header_hash', {
+          height: block.height,
+        });
+        continue;
+      }
       const prev = state.observations.get(block.height);
       if (prev !== undefined && prev.hash !== currentHash) {
         rawReorgs.push({
