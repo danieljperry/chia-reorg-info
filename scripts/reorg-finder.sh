@@ -22,7 +22,7 @@
 # Usage:
 #   ./reorg-finder.sh [-n COUNT] [-e END_HEIGHT] [-l LIMIT] [-m MIN_DEPTH]
 #                     [-q [true|false]] [-qq [true|false]] [-d DB_PATH]
-#                     [--json] [--peak-from rpc|db]
+#                     [--json] [--peak-from rpc|db] [--compare-proofs]
 #
 #   -n COUNT       Number of blocks to examine (default: 10). Pass `g` or
 #                  `genesis` to scan every block from END_HEIGHT down to the
@@ -49,6 +49,14 @@
 #                  the full-node RPC (default, rpc) or from the local DB via
 #                  `SELECT MAX(height) FROM full_blocks` (db). `db` avoids
 #                  any RPC dependency — useful for monitor-driven use.
+#   --compare-proofs  For each reorg, compare the proof-of-space at the
+#                  cluster's top height between the canonical and orphaned
+#                  blocks. Appends " — Proofs match" / " — Proofs don't
+#                  match" to each per-reorg summary line, adds a totals
+#                  line under "Found N reorgs:", and (when -q is not set)
+#                  shows a per-cluster verdict in the per-block-detail
+#                  section. Requires chia-blockchain Python package.
+#                  Default: disabled.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -72,6 +80,7 @@ main() {
   local QQ_QUIET="false"
   local JSON_OUT="false"
   local PEAK_FROM="rpc"
+  local COMPARE_PROOFS="false"
   local DB_PATH="${CHIA_DB:-$HOME/.chia/mainnet/db/blockchain_v2_mainnet.sqlite}"
   local SSL_DIR="${CHIA_SSL_DIR:-$HOME/.chia/mainnet/config/ssl/full_node}"
   local CERT_PATH="$SSL_DIR/private_full_node.crt"
@@ -106,6 +115,9 @@ while [[ $# -gt 0 ]]; do
     fi
     PEAK_FROM="$2"
     shift 2
+  elif [[ "$1" == "--compare-proofs" ]]; then
+    COMPARE_PROOFS="true"
+    shift
   elif [[ "$1" == "-q" ]]; then
     PRE_ARGS+=("-q")
     case "${2:-}" in
@@ -552,17 +564,135 @@ if [[ "$QQ_QUIET" == "true" ]]; then
   exit 0
 fi
 
+# -----------------------------------------------------------------------------
+# Proof-of-Space data gathering. We need PoS info in two scenarios:
+#   1. The per-block-detail section (QUIET=false): every block at every height
+#      in every cluster, both canonical and orphaned.
+#   2. --compare-proofs: at minimum, the two siblings at each cluster's top
+#      (high). When the per-block-detail also needs all blocks, the union
+#      already covers this — no separate query.
+# We hit the chia-blockchain Python helper once with all pairs to amortize the
+# import cost (it's ~1s of Python startup that we don't want per row).
+# -----------------------------------------------------------------------------
+POS_DATA=""
+POS_AVAILABLE="false"
+POS_HELPER="$(dirname "$SCRIPT_PATH")/_decode_pos.py"
+
+NEED_POS="false"
+[[ "$QUIET" == "false" || "$COMPARE_PROOFS" == "true" ]] && NEED_POS="true"
+
+if [[ "$NEED_POS" == "true" && -r "$POS_HELPER" ]]; then
+  POS_PAIRS=""
+  if [[ "$QUIET" == "false" ]]; then
+    # All blocks at all cluster heights.
+    while IFS=$'\t' read -r _h _hh; do
+      [[ -n "$_h" ]] && POS_PAIRS+="$_h	$_hh"$'\n'
+    done < <(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
+      "SELECT height, lower(hex(header_hash)) FROM full_blocks WHERE height IN ($HEIGHT_LIST);")
+  else
+    # --compare-proofs only: just the cluster tops.
+    for i in "${!CLUSTER_HIGHS[@]}"; do
+      while IFS= read -r _hh; do
+        [[ -n "$_hh" ]] && POS_PAIRS+="${CLUSTER_HIGHS[$i]}	$_hh"$'\n'
+      done < <(sqlite3 "file:${DB_PATH}?mode=ro" \
+        "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = ${CLUSTER_HIGHS[$i]};")
+    done
+  fi
+
+  if [[ -n "$POS_PAIRS" ]]; then
+    POS_DATA=$(printf '%s' "$POS_PAIRS" | python3 "$POS_HELPER" "$DB_PATH" 2>/dev/null || true)
+    if [[ -n "$POS_DATA" ]]; then
+      POS_AVAILABLE="true"
+    fi
+  fi
+fi
+
+# Look up a TSV field for a (height, hash) pair from POS_DATA.
+# Args: height header_hash field_index (1-based)
+# Fields: 1=height 2=hash 3=k 4=challenge 5=plot_pk 6=pool_value 7=pool_type 8=proof_sha256
+_pos_field() {
+  awk -v h="$1" -v hh="$2" -v f="$3" -F '\t' \
+    '$1 == h && $2 == hh { print $f; exit }' <<< "$POS_DATA"
+}
+
+# Compare proofs at the cluster top. Echoes "match", "no-match", or
+# "unavailable" (when PoS data couldn't be loaded for either side).
+_proof_compare_status() {
+  local high=$1 canonical_hash orphan_hash canonical_sha orphan_sha
+  canonical_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+    "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
+  orphan_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+    "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
+  canonical_sha=$(_pos_field "$high" "$canonical_hash" 8)
+  orphan_sha=$(_pos_field "$high" "$orphan_hash" 8)
+  if [[ -z "$canonical_sha" || -z "$orphan_sha" ]]; then
+    echo "unavailable"
+  elif [[ "$canonical_sha" == "$orphan_sha" ]]; then
+    echo "match"
+  else
+    echo "no-match"
+  fi
+}
+
+# Render the human verdict for a status. Two callers: per-reorg summary
+# suffix and the in-detail "Proof comparison:" line.
+_proof_verdict_text() {
+  case "$1" in
+    match)       echo "Proofs match" ;;
+    no-match)    echo "Proofs don't match" ;;
+    unavailable) echo "Proofs unavailable" ;;
+  esac
+}
+
+# Pre-compute per-cluster comparison statuses (used for both the per-reorg
+# suffix and the totals line). Indexed by cluster index.
+declare -a CLUSTER_PROOF_STATUS=()
+PROOF_MATCH_COUNT=0
+PROOF_NOMATCH_COUNT=0
+if [[ "$COMPARE_PROOFS" == "true" && "$POS_AVAILABLE" == "true" ]]; then
+  for i in "${!CLUSTER_HIGHS[@]}"; do
+    s=$(_proof_compare_status "${CLUSTER_HIGHS[$i]}")
+    CLUSTER_PROOF_STATUS[$i]="$s"
+    case "$s" in
+      match)    PROOF_MATCH_COUNT=$((PROOF_MATCH_COUNT + 1)) ;;
+      no-match) PROOF_NOMATCH_COUNT=$((PROOF_NOMATCH_COUNT + 1)) ;;
+    esac
+  done
+fi
+
+# Helper: append " — <verdict>" suffix to a per-reorg summary line when
+# --compare-proofs is set. Echoes empty string otherwise.
+_proof_suffix() {
+  local i=$1
+  if [[ "$COMPARE_PROOFS" == "true" && -n "${CLUSTER_PROOF_STATUS[$i]:-}" ]]; then
+    echo " — $(_proof_verdict_text "${CLUSTER_PROOF_STATUS[$i]}")"
+  fi
+}
+
 if [[ $N_CLUSTERS -eq 1 ]]; then
   size=$((CLUSTER_HIGHS[0] - CLUSTER_LOWS[0] + 1))
   ts_suffix=$(fmt_ts_suffix "${CLUSTER_LOWS[0]}" "${CLUSTER_HIGHS[0]}")
-  echo "Found a reorg of $size block(s) (heights ${CLUSTER_LOWS[0]}..${CLUSTER_HIGHS[0]}) $ts_suffix:"
+  echo "Found a reorg of $size block(s) (heights ${CLUSTER_LOWS[0]}..${CLUSTER_HIGHS[0]}) $ts_suffix$(_proof_suffix 0):"
 else
   echo "Found $N_CLUSTERS reorgs:"
   for i in "${!CLUSTER_LOWS[@]}"; do
     size=$((CLUSTER_HIGHS[$i] - CLUSTER_LOWS[$i] + 1))
     ts_suffix=$(fmt_ts_suffix "${CLUSTER_LOWS[$i]}" "${CLUSTER_HIGHS[$i]}")
-    echo "  Reorg of $size block(s) at heights ${CLUSTER_LOWS[$i]}..${CLUSTER_HIGHS[$i]} $ts_suffix"
+    echo "  Reorg of $size block(s) at heights ${CLUSTER_LOWS[$i]}..${CLUSTER_HIGHS[$i]} $ts_suffix$(_proof_suffix $i)"
   done
+fi
+
+# Totals line for proof matches (under "Found N reorgs:" / equivalent).
+# Shown when --compare-proofs is set; -qq already exited before this point.
+if [[ "$COMPARE_PROOFS" == "true" ]]; then
+  if [[ "$POS_AVAILABLE" == "true" ]]; then
+    PROOF_UNAVAIL_COUNT=$((N_CLUSTERS - PROOF_MATCH_COUNT - PROOF_NOMATCH_COUNT))
+    extra=""
+    [[ $PROOF_UNAVAIL_COUNT -gt 0 ]] && extra=" ($PROOF_UNAVAIL_COUNT unavailable)"
+    echo "Of those reorgs, $PROOF_MATCH_COUNT have matching proofs and $PROOF_NOMATCH_COUNT have differing proofs.$extra"
+  else
+    echo "Of those reorgs, proof comparison is unavailable (chia-blockchain Python package not importable)."
+  fi
 fi
 
 if [[ "$QUIET" == "false" ]]; then
@@ -579,6 +709,50 @@ FROM full_blocks
 WHERE height IN ($HEIGHT_LIST)
 ORDER BY height, in_main_chain DESC;
 SQL
+
+  # Proof-of-Space detail per block, plus per-cluster comparison verdict
+  # when --compare-proofs is set.
+  if [[ "$POS_AVAILABLE" == "true" ]]; then
+    echo
+    echo "Proof of Space (per block at reorged heights):"
+    # Iterate in the same order as the table above.
+    while IFS=$'\t' read -r _h _hh _imc; do
+      [[ -z "$_h" ]] && continue
+      _k=$(_pos_field "$_h" "$_hh" 3)
+      _ch=$(_pos_field "$_h" "$_hh" 4)
+      _ppk=$(_pos_field "$_h" "$_hh" 5)
+      _pv=$(_pos_field "$_h" "$_hh" 6)
+      _pt=$(_pos_field "$_h" "$_hh" 7)
+      role="canonical"; [[ "$_imc" == "0" ]] && role="orphaned"
+      if [[ -z "$_k" ]]; then
+        printf "  height=%s %s (%s):  PoS data unavailable\n" "$_h" "${_hh:0:8}…${_hh: -4}" "$role"
+      else
+        printf "  height=%s %s (%s):  k=%s  challenge=%s…%s  plot_pk=%s…%s  %s=%s…%s\n" \
+          "$_h" "${_hh:0:8}…${_hh: -4}" "$role" \
+          "$_k" \
+          "${_ch:0:8}" "${_ch: -4}" \
+          "${_ppk:0:8}" "${_ppk: -4}" \
+          "$_pt" "${_pv:0:8}" "${_pv: -4}"
+      fi
+    done < <(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
+      "SELECT height, lower(hex(header_hash)), in_main_chain FROM full_blocks WHERE height IN ($HEIGHT_LIST) ORDER BY height, in_main_chain DESC;")
+
+    if [[ "$COMPARE_PROOFS" == "true" ]]; then
+      echo
+      echo "Proof comparison at each cluster's top height:"
+      for i in "${!CLUSTER_HIGHS[@]}"; do
+        s="${CLUSTER_PROOF_STATUS[$i]:-unavailable}"
+        printf "  heights %s..%s (top=%s):  %s\n" \
+          "${CLUSTER_LOWS[$i]}" "${CLUSTER_HIGHS[$i]}" "${CLUSTER_HIGHS[$i]}" \
+          "$(_proof_verdict_text "$s")"
+      done
+    fi
+  elif [[ "$NEED_POS" == "true" ]]; then
+    # User wanted PoS info but the helper failed (chia-blockchain not
+    # installed, or python3 not on PATH, etc.). Don't silently omit.
+    echo
+    echo "Proof of Space: unavailable (chia-blockchain Python package not importable)."
+  fi
 fi
 }
 
