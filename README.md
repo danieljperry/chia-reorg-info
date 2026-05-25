@@ -1,11 +1,25 @@
 # chia-reorg-info
 
-Two complementary tools for analysing Chia blockchain re-organisations, with **no MCP dependency**. Everything runs locally or against the public [coinset.org](https://www.coinset.org) full-node API.
+This repo was vibe coded with Claude Opus 4.7. It provides two tools for analyzing Chia blockchain reorgs.
 
-- **Reorg Finder** — a bash script that queries a local Chia v2 SQLite database for heights that have multiple block records (orphaned siblings of re-orged blocks). Good for retrospective audits.
-- **Reorg Monitor** — a long-running Node CLI (also installable as a Linux service) that polls the chain in real time, detects re-orgs as they happen, and optionally sends email alerts.
+1. **Reorg Finder** — a bash script that queries a local Chia v2 SQLite database for reorgs (indicated by heights that have multiple block records, includes orphaned siblings). Good for retrospective audits.
+2. **Reorg Monitor** — a long-running Node CLI (also installable as a Linux service) that polls the chain in real time and detects reorgs as they happen. It also optionally sends email alerts, which can be configured by reorg depth (e.g. email an on-call employee whenever a 1-block reorg is detected, and also email the lead engineer whenever a 4-block reorg is detected).
 
-The monitor binary also exposes two one-shot subcommands (`check_block_canonical` and `scan_chain_consistency`) used by the monitor internally.
+Both of these tools currently require Linux (tested on Ubuntu only). They should work on Ubuntu server without a GUI, but I haven't tested this. I could add more OS options if there is interest.
+
+The reorg finder is a tool to run for specific queries. It doesn't poll Coinset because Coinset currently doesn't detect reorgs, although this option may be added in the future. You therefore need to have access to a Chia blockchain database in order to run it. The database queries are read-only, so the script is safe to run alongside a synced full node. In fact, this setup is preferable, as it will provide the most up-to-date results. The script is quite fast -- it can query a week's worth of data in a few seconds, and it only takes around one minute to scan the whole blockchain from genesis until today.
+
+The reorg monitor is meant to be run continuously in the background, either in an open terminal window, or as a service. It has three modes:
+1. local only -- check the local database for reorgs at specified time intervals (default 10 seconds)
+2. Coinset only -- call the Coinset API to get the latest block info, and monitor it for changes in order to detect reorgs
+3. Both (local + Coinset) -- detect reorgs against the local node and Coinset, compare the two, and email the results from both in a single email (assuming the data matches)
+
+A few caveats:
+* Coinset's polling is imperfect, and depends on timing. Longer reorgs will often result in confidence intervals being reported, e.g. "A reorg with a depth of 1-4 blocks was detected." Single-block reorgs are typically reported with more confidence.
+* Blockchain databases are not all identical. You may have a clean copy, without any orphaned blocks, in which case you won't find any historical reorgs. Even when looking for reorgs in real time, it is common for different nodes to report different results. This is merely a facet of Chia's decentralized architecture. If your local results don't match those of Coinset, it doesn't necessarily indicate an issue.
+* When using the reorg finder, the times listed are approximate, out of necessity. This is because non-tx blocks (about 2/3 of all blocks) don't come with a canonical timestamp. The script will therefore list the timestamp from the previous tx block as the starting point, and the timestamp from the next tx block as the ending point of the reorg.
+* If you are interested in sending an email when reorgs are detected, you will need to set up your own SMTP service locally.
+* Reorgs of a single block can occur dozens of times daily. If you are emailing your results, they will be noisy unless you increase the threshold to be something higher than 1.
 
 ## Install
 
@@ -101,8 +115,8 @@ Found 4 reorgs:
 #### Count re-orgs of 7+ blocks ever recorded in the local database (one-line summary)
 
 ```bash
-$ scripts/reorg-finder.sh -n g -m 7 -qq
-Found 0 reorgs of at least 7 blocks in the specified range.
+scripts/reorg-finder.sh -n g -m 7 -qq
+Found 22 reorgs of at least 7 blocks in the specified range.
 ```
 
 (A typical mainnet node sees very few re-orgs deeper than 3 blocks. `-n g` is shorthand for "scan from `END_HEIGHT` down to genesis"; on a full mainnet DB this is a full-table scan and can take minutes to complete.)
@@ -131,7 +145,7 @@ $ scripts/reorg-finder.sh -n 10 --json --peak-from db | jq .
 
 ## Reorg Monitor — as a CLI on Linux
 
-The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent.
+The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent. See the "Email setup" section below to set up the email env file.
 
 ### Detection sources
 
@@ -238,6 +252,8 @@ Templates for systemd, launchd, and Windows NSSM are in [`service/`](service/).
 
 ### systemd (user-level, no root required)
 
+This setup is for systems that don't need hardening. See the next section if you require full hardening.
+
 ```bash
 # 1. Edit service/chia-reorg-monitor.service: set <node-bin> (output of `which node`),
 #    <install-path> (absolute path to this checkout), and <smtp-env-file>.
@@ -287,7 +303,7 @@ sudo chown -R chia-reorg:chia-reorg /opt/chia-reorg-info
 sudo cp service/chia-reorg-monitor.system.service \
         /etc/systemd/system/chia-reorg-monitor.service
 sudo mkdir -p /etc/chia-reorg-info
-sudo $EDITOR /etc/chia-reorg-info/smtp.env   # contents per "Email setup" below
+sudo $EDITOR /etc/chia-reorg-info/smtp.env   # See the "Email setup" section below for the expected contents of this file
 sudo chown root:chia-reorg /etc/chia-reorg-info/smtp.env
 sudo chmod 0640 /etc/chia-reorg-info/smtp.env
 
