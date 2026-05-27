@@ -194,6 +194,113 @@ describe('consolidateCoinsetBatch — group per-height events into cluster Sourc
   });
 });
 
+describe('old_block_record propagation through the dual-source pipeline', () => {
+  it('reorgEventToSourceEvent copies old_block_record from the Coinset ReorgEvent', () => {
+    // The Coinset poller already has the full BlockRecord on the ReorgEvent
+    // (from get_block_records). Before this propagation was added, the
+    // record was dropped at the dual-source boundary, regressing the
+    // pre-dual-source coinset-only email body.
+    const fullRecord = { weight: 12345, signage_point_index: 49, timestamp: null };
+    const evt: ReorgEvent = {
+      height: 8773500,
+      old_header_hash: 'aa'.repeat(32),
+      new_header_hash: 'bb'.repeat(32),
+      detected_at: '2026-05-25T02:45:27.985Z',
+      depth: 1,
+      max_depth: 4,
+      blocks_from_peak: 0,
+      old_block_record: fullRecord,
+    };
+    const s = reorgEventToSourceEvent(evt, 'coinset');
+    expect(s.old_block_record).toEqual(fullRecord);
+  });
+
+  it('reorgEventToSourceEvent passes through null when old_block_record is missing/non-object', () => {
+    const evt: ReorgEvent = {
+      height: 100,
+      old_header_hash: 'aa'.repeat(32),
+      new_header_hash: 'bb'.repeat(32),
+      detected_at: '2026-05-25T00:00:00Z',
+      depth: 1,
+      max_depth: 1,
+      blocks_from_peak: 0,
+      old_block_record: null,
+    };
+    const s = reorgEventToSourceEvent(evt, 'coinset');
+    expect(s.old_block_record).toBeNull();
+  });
+
+  it('consolidateCoinsetBatch uses the LAST event\'s old_block_record for the cluster', () => {
+    // The synthesized email reports the cluster's top height; using the
+    // top (last) event's record keeps email contents consistent with
+    // height=last.height.
+    const recordA = { tag: 'first', height: 100 };
+    const recordB = { tag: 'middle', height: 101 };
+    const recordC = { tag: 'top', height: 102 };
+    const evts: ReorgEvent[] = [100, 101, 102].map((h, i) => ({
+      height: h,
+      old_header_hash: 'aa'.repeat(32),
+      new_header_hash: 'bb'.repeat(32),
+      detected_at: '2026-05-25T00:00:00Z',
+      depth: 3,
+      max_depth: 3,
+      blocks_from_peak: 0,
+      old_block_record: [recordA, recordB, recordC][i]!,
+    }));
+    const out = consolidateCoinsetBatch(evts);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.old_block_record).toEqual(recordC);
+  });
+
+  it('consolidateCoinsetBatch sets old_block_record=null when last has none', () => {
+    const evts: ReorgEvent[] = [
+      {
+        height: 100,
+        old_header_hash: 'aa'.repeat(32),
+        new_header_hash: 'bb'.repeat(32),
+        detected_at: '2026-05-25T00:00:00Z',
+        depth: 1,
+        max_depth: 1,
+        blocks_from_peak: 0,
+        old_block_record: null,
+      },
+    ];
+    const out = consolidateCoinsetBatch(evts);
+    expect(out[0]!.old_block_record).toBeNull();
+  });
+
+  it('synthesizeReorgEventFromSource passes through a populated old_block_record (Coinset)', () => {
+    const fullRecord = { weight: 999, signage_point_index: 10 };
+    const s: SourceEvent = {
+      source: 'coinset',
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T00:00:00Z',
+      old_block_record: fullRecord,
+    };
+    const evt = synthesizeReorgEventFromSource(s);
+    expect(evt.old_block_record).toBe(fullRecord);
+  });
+
+  it('synthesizeReorgEventFromSource falls back to {timestamp} when old_block_record absent', () => {
+    const s: SourceEvent = {
+      source: 'coinset',
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T00:00:00Z',
+      ts_high_unix: 1700000000,
+    };
+    const evt = synthesizeReorgEventFromSource(s);
+    expect(evt.old_block_record).toEqual({ timestamp: 1700000000 });
+  });
+});
+
 describe('synthesizeReorgEventFromSource — uses observed height not widened high', () => {
   it('Coinset event: synthesized ReorgEvent.height = low (the actual observed height)', () => {
     const s: SourceEvent = {
