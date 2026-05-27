@@ -12,6 +12,18 @@ const HELPER_PATH = join(
   'fixtures',
   'check-db-readable-helper.ts'
 );
+// Use tsx directly from node_modules (NOT via `npx tsx`). `npx` invokes
+// `npm`, which tries to mkdir under `~/.npm/_cacache`; when the parent
+// is root and the subprocess is uid 65534, that's /root/.npm and the
+// nobody user gets EACCES. Calling the tsx CLI shim bypasses npm
+// entirely.
+const TSX_BIN = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'node_modules',
+  '.bin',
+  'tsx'
+);
 
 /**
  * Spawn the helper script as the given uid and return its stdout.
@@ -21,17 +33,13 @@ const HELPER_PATH = join(
  * errored — that's a real bug to surface.
  */
 function checkAsUid(filepath: string, uid: number): string | null {
-  const r = spawnSync(
-    'npx',
-    ['--no-install', 'tsx', HELPER_PATH, filepath],
-    {
-      encoding: 'utf8',
-      uid,
-      // tsx wants a writable home for its compile cache; give it /tmp
-      // since the `nobody` user has no home directory.
-      env: { ...process.env, HOME: tmpdir(), XDG_CACHE_HOME: tmpdir() },
-    }
-  );
+  const r = spawnSync(TSX_BIN, [HELPER_PATH, filepath], {
+    encoding: 'utf8',
+    uid,
+    // tsx wants a writable home for its compile cache; give it the
+    // shared /tmp since the `nobody` user has no real home directory.
+    env: { ...process.env, HOME: tmpdir(), XDG_CACHE_HOME: tmpdir() },
+  });
   if (r.error !== undefined) return null; // EPERM, ENOENT, etc.
   if (r.status !== 0) {
     throw new Error(
