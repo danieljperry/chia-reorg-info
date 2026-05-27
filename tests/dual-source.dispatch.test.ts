@@ -207,12 +207,26 @@ describe('dual-source dispatch outcomes', () => {
     expect(calls).toEqual(['coinset-only']);
   });
 
-  it('vi.fn dispatch hook is callable from the coordinator', async () => {
-    const fn = vi.fn();
+  it('dispatch hook receives an outcome with the right shape and source data', async () => {
+    // Previously this test only verified that the hook was called at all
+    // (tautological — implied by every other test in this file). Now it
+    // asserts the outcome's structure matches the contract: kind +
+    // appropriately-shaped event field, with the source data preserved
+    // verbatim from noteReorg's input.
+    const fn = vi.fn<(o: DispatchOutcome) => void>();
     const c = createDualSource('coinset', fn);
     c.noteReorg(coinsetEvt(100, 100, 1));
     await c.notePeak('coinset', 102);
     expect(fn).toHaveBeenCalledOnce();
+    const arg = fn.mock.calls[0]![0];
+    expect(arg.kind).toBe('coinset-only');
+    if (arg.kind === 'coinset-only') {
+      expect(arg.event.source).toBe('coinset');
+      expect(arg.event.low).toBe(100);
+      expect(arg.event.high).toBe(100);
+      expect(arg.event.depth).toBe(1);
+      expect(arg.event.max_depth).toBe(1);
+    }
   });
 
   it('regression (8773694): widened coinset high does not cause local to release ahead of coinset', async () => {

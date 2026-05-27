@@ -89,9 +89,32 @@ describe('dual-source matches()', () => {
     expect(matches(c, l)).toBe(false);
   });
 
-  it('matches is symmetric (a,b) == (b,a)', () => {
-    const c = coinset(100, 103, 1, 4);
-    const l = local(99, 101, 3);
-    expect(matches(c, l)).toBe(matches(l, c));
+  it('matches is symmetric across a sweep of pairs (not just one)', () => {
+    // Property: matches(a, b) === matches(b, a) for any inputs. Previously
+    // tested with one specific pair, which a fully-asymmetric implementation
+    // would still pass. This sweep covers the four spec examples plus
+    // boundary cases — touching-but-not-overlapping, fully-covering depth
+    // ranges, single-block overlap, etc. — and asserts symmetry on each.
+    const pairs: Array<[SourceEvent, SourceEvent]> = [
+      [coinset(100, 103, 1, 4), local(100, 102, 3)],
+      [coinset(100, 103, 1, 4), local(99, 101, 3)],
+      [coinset(100, 100, 1, 1), local(100, 102, 3)],
+      [coinset(100, 100, 1, 1), local(101, 101, 1)],
+      [coinset(98, 100, 3, 3), local(101, 103, 3)],
+      [coinset(98, 100, 3, 3), local(100, 102, 3)],
+      [coinset(100, 100, 1, 5), local(100, 100, 3)],
+      [coinset(100, 100, 1, 2), local(100, 100, 5)],
+      [coinset(50, 60, 5, 10), local(55, 65, 7)],
+      [coinset(8773500, 8773500, 1, 4), local(8773500, 8773500, 1)],
+      [coinset(8773500, 8773500, 1, 1), local(8773501, 8773501, 1)],
+    ];
+    for (const [a, b] of pairs) {
+      const ab = matches(a, b);
+      const ba = matches(b, a);
+      expect(
+        ab,
+        `matches asymmetric for a=${JSON.stringify(a)} b=${JSON.stringify(b)}: matches(a,b)=${ab}, matches(b,a)=${ba}`
+      ).toBe(ba);
+    }
   });
 });

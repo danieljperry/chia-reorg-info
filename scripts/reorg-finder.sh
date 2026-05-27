@@ -92,6 +92,21 @@
 #                  Auto-detected from `which chia` if unset. Example:
 #                  CHIA_PYTHON=~/chia-blockchain/venv/bin/python
 
+# Validate a timestamp string returned from an RPC. Returns the input
+# unchanged when it matches ^[0-9]+$ (a non-negative integer), or an empty
+# string otherwise. Extracted to top level so tests can source the script
+# and call this directly without exercising the RPC machinery — the
+# previous test inlined a copy of the regex, which didn't actually verify
+# the production guard.
+_validate_timestamp_string() {
+  local ts=$1
+  if [[ -n "$ts" ]] && ! [[ "$ts" =~ ^[0-9]+$ ]]; then
+    printf '%s' ""
+  else
+    printf '%s' "$ts"
+  fi
+}
+
 main() {
   set -euo pipefail
 
@@ -113,6 +128,10 @@ main() {
   local CERT_PATH="$SSL_DIR/private_full_node.crt"
   local KEY_PATH="$SSL_DIR/private_full_node.key"
   local NODE_HOST="${NODE_HOST:-https://localhost:8555}"
+  # Coinset fallback for timestamp lookups when the local-node RPC isn't
+  # reachable. Env-overridable so tests can point at an unreachable URL to
+  # avoid real network calls.
+  local COINSET_HOST="${COINSET_HOST:-https://api.coinset.org}"
   # Python interpreter used to import chia-blockchain (for --compare-proofs
   # and the proof-of-space output in the per-block-detail section). System
   # python3 typically doesn't have chia installed — chia is normally in its
@@ -432,14 +451,20 @@ _lookup_one_timestamp() {
   local h=$1 out ts
   out=""
   if [[ -r "$CERT_PATH" && -r "$KEY_PATH" ]]; then
-    out=$(curl -sk -X POST --cert "$CERT_PATH" --key "$KEY_PATH" \
+    # --max-time 3: cap per-request wall time so a stalled local node
+    # doesn't hang the scan. The user can re-run if a transient blip is
+    # blamed for a missing timestamp.
+    out=$(curl -sk --max-time 3 -X POST --cert "$CERT_PATH" --key "$KEY_PATH" \
       "${NODE_HOST}/get_block_record_by_height" \
       -H 'Content-Type: application/json' \
       -d "{\"height\":$h}" 2>/dev/null || true)
   fi
   if [[ -z "$out" ]]; then
-    out=$(curl -s -X POST \
-      "https://api.coinset.org/get_block_record_by_height" \
+    # Same --max-time cap on the coinset fallback. Without this, a scan
+    # over many reorgs in an offline environment could hang for hours
+    # waiting on curl's default connect timeout (300s per call).
+    out=$(curl -s --max-time 3 -X POST \
+      "${COINSET_HOST}/get_block_record_by_height" \
       -H 'Content-Type: application/json' \
       -d "{\"height\":$h}" 2>/dev/null || true)
   fi
@@ -460,9 +485,7 @@ except Exception:
   # value would be RCE in one path and JSON corruption in the other. The
   # upstream RPCs (localhost full node via `curl -sk`, plus coinset fallback)
   # are not fully trusted for the purposes of code-eval, so validate here.
-  if [[ -n "$ts" ]] && ! [[ "$ts" =~ ^[0-9]+$ ]]; then
-    ts=""
-  fi
+  ts=$(_validate_timestamp_string "$ts")
   printf '%s' "$ts"
 }
 
@@ -1148,5 +1171,9 @@ fi
 
 # Run in a subshell so that `exit` and `set -e` inside main() can never affect
 # the parent shell — important if a user `source`s this script. (When executed
-# normally, this is a no-op.)
-(main "$@")
+# normally, this is a no-op.) The outer guard additionally skips invocation
+# when the script is sourced (BASH_SOURCE[0] != $0), so tests can source the
+# script to call helpers like _validate_timestamp_string directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  (main "$@")
+fi

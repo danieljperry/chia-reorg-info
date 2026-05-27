@@ -1,29 +1,53 @@
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-// Verify the bash regex guard added to scripts/reorg-finder.sh's
-// _lookup_one_timestamp: anything that's not a non-negative integer must be
-// rejected before being interpolated into a `python3 -c` template (the path
-// that would otherwise be a code-execution sink).
-//
-// We test the regex behavior directly by running it under bash with the same
-// shape (`[[ "$ts" =~ ^[0-9]+$ ]]`). That mirrors what the script does after
-// the python-RPC parser returns its value.
-function isAcceptedByGuard(ts: string): boolean {
-  const r = spawnSync('bash', ['-c', `ts=$1; [[ "$ts" =~ ^[0-9]+$ ]] && echo accept || echo reject`, '_', ts], {
-    encoding: 'utf8',
-  });
-  return r.stdout.trim() === 'accept';
+// Tests the guard inside scripts/reorg-finder.sh's _lookup_one_timestamp that
+// rejects RPC-returned timestamps before they reach `python3 -c` (would be
+// RCE) or unquoted JSON emission (would be malformed). The previous version
+// of this test inlined a duplicate of the regex into bash, which verified
+// regex semantics but NOT the production code — a silent weakening of the
+// production guard would have passed. Here we source the script (with the
+// new guard at the bottom so sourcing doesn't run main) and call the
+// extracted _validate_timestamp_string function directly.
+
+const SCRIPT_PATH = fileURLToPath(
+  new URL('../scripts/reorg-finder.sh', import.meta.url)
+);
+
+function validate(ts: string): string {
+  const r = spawnSync(
+    'bash',
+    [
+      '-c',
+      // Source the script (no main invocation thanks to the
+      // BASH_SOURCE[0] != $0 guard), then call the function the production
+      // _lookup_one_timestamp invokes.
+      `source "$1"; _validate_timestamp_string "$2"`,
+      '_',
+      SCRIPT_PATH,
+      ts,
+    ],
+    { encoding: 'utf8' }
+  );
+  if (r.status !== 0) {
+    throw new Error(`bash exited ${r.status}: ${r.stderr}`);
+  }
+  return r.stdout;
 }
 
-describe('reorg-finder.sh _lookup_one_timestamp guard', () => {
-  it('accepts ordinary unix timestamps', () => {
-    expect(isAcceptedByGuard('0')).toBe(true);
-    expect(isAcceptedByGuard('1700000000')).toBe(true);
+describe('reorg-finder.sh _validate_timestamp_string (production guard)', () => {
+  it('returns the input unchanged for ordinary unix timestamps', () => {
+    expect(validate('0')).toBe('0');
+    expect(validate('1700000000')).toBe('1700000000');
   });
 
-  it('accepts a long integer (no overflow concern for bash regex)', () => {
-    expect(isAcceptedByGuard('99999999999999')).toBe(true);
+  it('accepts a long integer (no overflow concern)', () => {
+    expect(validate('99999999999999')).toBe('99999999999999');
+  });
+
+  it('returns empty string for empty input (no-op pass-through)', () => {
+    expect(validate('')).toBe('');
   });
 
   it.each([
@@ -39,16 +63,18 @@ describe('reorg-finder.sh _lookup_one_timestamp guard', () => {
     ['empty space', ' 1700000000'],
     ['trailing space', '1700000000 '],
     ['comma', '1,700,000,000'],
-  ])('rejects %s', (_label, payload) => {
-    expect(isAcceptedByGuard(payload)).toBe(false);
+    ['letter prefix', 'abc'],
+  ])('returns empty string for invalid input: %s', (_label, payload) => {
+    expect(validate(payload)).toBe('');
   });
 
-  it('the script file actually contains the guard (regression: do not remove)', async () => {
+  it('_lookup_one_timestamp invokes _validate_timestamp_string (production wiring check)', async () => {
+    // Defense against accidentally deleting the call site. The production
+    // function should call our validator; verify by reading the source.
     const { readFile } = await import('node:fs/promises');
-    const src = await readFile(
-      new URL('../scripts/reorg-finder.sh', import.meta.url),
-      'utf8'
-    );
-    expect(src).toMatch(/\[\[\s*"\$ts"\s*=~\s*\^\[0-9\]\+\$\s*\]\]/);
+    const src = await readFile(SCRIPT_PATH, 'utf8');
+    // Match the line in _lookup_one_timestamp that wraps `ts` through the
+    // validator. If anyone removes or renames that call, this trips.
+    expect(src).toMatch(/ts=\$\(_validate_timestamp_string "\$ts"\)/);
   });
 });
