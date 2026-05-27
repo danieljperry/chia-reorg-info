@@ -1,9 +1,45 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, chmodSync, constants as fsConstants, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkDbPathReadable } from '../src/cli/reorg-monitor.js';
+
+const NOBODY_UID = 65534;
+const HELPER_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures',
+  'check-db-readable-helper.ts'
+);
+
+/**
+ * Spawn the helper script as the given uid and return its stdout.
+ * Returns null when the spawn itself failed (e.g. running as non-root
+ * so the kernel rejected the uid switch, or the uid doesn't exist on
+ * this system). Throws if the spawn succeeded but the helper itself
+ * errored — that's a real bug to surface.
+ */
+function checkAsUid(filepath: string, uid: number): string | null {
+  const r = spawnSync(
+    'npx',
+    ['--no-install', 'tsx', HELPER_PATH, filepath],
+    {
+      encoding: 'utf8',
+      uid,
+      // tsx wants a writable home for its compile cache; give it /tmp
+      // since the `nobody` user has no home directory.
+      env: { ...process.env, HOME: tmpdir(), XDG_CACHE_HOME: tmpdir() },
+    }
+  );
+  if (r.error !== undefined) return null; // EPERM, ENOENT, etc.
+  if (r.status !== 0) {
+    throw new Error(
+      `helper subprocess exited ${r.status} (uid=${uid}): stderr=${r.stderr}`
+    );
+  }
+  return r.stdout;
+}
 
 describe('checkDbPathReadable', () => {
   let dir: string;
@@ -44,33 +80,16 @@ describe('checkDbPathReadable', () => {
     expect(checkDbPathReadable(sub)).toMatch(/not a regular file/);
   });
 
-  it('flags an unreadable file', (ctx) => {
-    // Goal: verify checkDbPathReadable distinguishes "exists but not
-    // readable" from "missing." The challenge is that root with
-    // CAP_DAC_OVERRIDE bypasses chmod/ACL and can read anything.
-    //
-    // We attempt to construct an unreadable file with chmod 000 + a
-    // restrictive POSIX ACL (which sometimes denies even root, depending on
-    // the kernel/capability set). Then we verify accessSync actually fails
-    // for *this* process before running the assertion. If the file is still
-    // readable (e.g. running as root with default caps), we skip cleanly via
-    // ctx.skip() rather than silently passing as the previous version did.
+  it('flags an unreadable file (direct: when this process cannot bypass perms)', (ctx) => {
+    // The simple path: chmod 000 + we run as a uid that can't bypass.
+    // Holds for any non-root test runner. If we're root with
+    // CAP_DAC_OVERRIDE, accessSync still succeeds and we skip — the
+    // sibling test below handles the root-via-subprocess case.
     const p = join(dir, 'locked.sqlite');
-    writeFileSync(p, 'fake', { mode: 0o644 });
-    chmodSync(p, 0o000);
-
-    // Try to set a deny-everyone ACL too. Best-effort: setfacl may not be
-    // installed, and even when it is, root often bypasses ACLs via
-    // CAP_DAC_OVERRIDE. We don't fail the test if setfacl is missing — the
-    // verification step below handles the actual decision.
+    writeFileSync(p, 'fake', { mode: 0o000 });
     spawnSync('setfacl', ['-m', 'u::---,g::---,o::---,m::---', p], {
       encoding: 'utf8',
     });
-
-    // Verify the file is actually unreadable for THIS process before
-    // running the assertion. If we can still read it, skip — testing
-    // checkDbPathReadable's "not readable" branch from a process that
-    // can read everything is meaningless.
     let blocked = false;
     try {
       accessSync(p, fsConstants.R_OK);
@@ -81,9 +100,39 @@ describe('checkDbPathReadable', () => {
       ctx.skip();
       return;
     }
+    expect(checkDbPathReadable(p)).toMatch(/not readable/);
+  });
 
-    const reason = checkDbPathReadable(p);
-    expect(reason).toMatch(/not readable/);
+  it('flags an unreadable file (via subprocess as nobody when test runner is root)', (ctx) => {
+    // The "CAP_DAC_OVERRIDE bypass" case: previously this test silently
+    // skipped via early return whenever uid === 0 (i.e. nearly always in
+    // CI containers), leaving the "not readable" branch effectively
+    // uncovered. Now we spawn the helper as uid 65534 (nobody) so the
+    // child genuinely can't read the file, which exercises the branch.
+    //
+    // Skip only when:
+    //   - we're not running as root AND we couldn't lock the file
+    //     against ourselves (covered by the sibling test instead), OR
+    //   - the spawn-as-nobody attempt fails (e.g. running as root in a
+    //     container with capabilities dropped; no CAP_SETUID)
+    if (process.getuid?.() !== 0) {
+      ctx.skip();
+      return;
+    }
+    const p = join(dir, 'locked.sqlite');
+    writeFileSync(p, 'fake', { mode: 0o000 });
+    // World-readable on parents and node_modules so the nobody subprocess
+    // can actually load the helper; that's already true on default umask,
+    // but if tmpdir is mode 0700 we explicitly widen this test's dir.
+    chmodSync(dir, 0o755);
+
+    const out = checkAsUid(p, NOBODY_UID);
+    if (out === null) {
+      // Couldn't setuid (no CAP_SETUID, or `nobody` uid not allowed).
+      ctx.skip();
+      return;
+    }
+    expect(out).toMatch(/not readable/);
   });
 
   it('flags a broken symlink as ENOENT', () => {
