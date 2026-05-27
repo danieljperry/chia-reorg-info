@@ -22,6 +22,12 @@ export type LocalReorg = {
   old_hash: string | null;
   /** Canonical block's header_hash at `high`, same encoding. */
   new_hash: string | null;
+  /** Decoded BlockRecord of the orphan at `high` (the same shape that
+   *  coinset.org's get_block_record_by_height returns: weight, total_iters,
+   *  signage_point_index, VDF outputs, reward claims, etc.). Null if the
+   *  JSON omits the field (older script), the chia python helper failed,
+   *  or the row went missing mid-scan. */
+  old_block_record: Record<string, unknown> | null;
 };
 
 export type LocalScanResult = {
@@ -106,6 +112,16 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
     const new_hash = e.new_hash === undefined ? null : e.new_hash;
     if (old_hash !== null && (typeof old_hash !== 'string' || !isHex32(old_hash))) return null;
     if (new_hash !== null && (typeof new_hash !== 'string' || !isHex32(new_hash))) return null;
+    // old_block_record is optional. When present it must be a plain object
+    // (the decoded BlockRecord.to_json_dict() from the chia python helper)
+    // or null. We don't deep-validate field-by-field — it's pass-through
+    // data destined for JSON.stringify in the email body.
+    const obr_raw = e.old_block_record === undefined ? null : e.old_block_record;
+    let old_block_record: Record<string, unknown> | null = null;
+    if (obr_raw !== null) {
+      if (typeof obr_raw !== 'object' || Array.isArray(obr_raw)) return null;
+      old_block_record = obr_raw as Record<string, unknown>;
+    }
     reorgs.push({
       low: e.low,
       high: e.high,
@@ -114,6 +130,7 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
       ts_high_unix: e.ts_high_unix,
       old_hash,
       new_hash,
+      old_block_record,
     });
   }
   return {

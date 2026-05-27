@@ -150,6 +150,58 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).toContain('1748097540');
   });
 
+  it('local source with full old_block_record propagates it into the email body', async () => {
+    mockSendMail.mockClear();
+    const fullRecord = {
+      header_hash: '0x' + '2d'.repeat(32),
+      weight: 54814746912,
+      total_iters: 97745094007150,
+      signage_point_index: 49,
+      timestamp: 1779831225,
+      fees: 392389759,
+      farmer_puzzle_hash: '0x' + '4b'.repeat(32),
+    };
+    const localSource = {
+      source: 'local' as const,
+      low: 8781783,
+      high: 8781783,
+      settle_at: 8781783,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-27T00:00:00Z',
+      ts_high_unix: 1779831225,
+      old_header_hash: '2d'.repeat(32),
+      new_header_hash: '36'.repeat(32),
+      old_block_record: fullRecord,
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    expect(evt.old_block_record).toBe(fullRecord);
+
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 8781800, {});
+    const body = (mockSendMail.mock.calls[0]?.[0] as { text: string }).text;
+    // Every key from the rich record should appear in the rendered body.
+    expect(body).toContain('"weight": 54814746912');
+    expect(body).toContain('"signage_point_index": 49');
+    expect(body).toContain('"farmer_puzzle_hash"');
+    expect(body).toContain('"fees": 392389759');
+    expect(body).toContain('The original block was a tx block with the following contents:');
+  });
+
+  it('local source WITHOUT old_block_record falls back to {timestamp} (preserves old behavior)', () => {
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T00:00:00Z',
+      ts_high_unix: 1700000000,
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    expect(evt.old_block_record).toEqual({ timestamp: 1700000000 });
+  });
+
   it('local source with null hashes falls back to "(unavailable — local DB detection)"', () => {
     const localSource = {
       source: 'local' as const,

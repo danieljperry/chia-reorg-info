@@ -450,6 +450,11 @@ export function consolidateCoinsetBatch(events: ReorgEvent[]): SourceEvent[] {
         detected_at_iso: first.detected_at,
         ts_low_unix: null,
         ts_high_unix: null,
+        // The synthesized email reports the cluster top — use last's record.
+        old_block_record:
+          typeof last.old_block_record === 'object' && last.old_block_record !== null
+            ? (last.old_block_record as Record<string, unknown>)
+            : null,
       });
       clusterStart = i;
     }
@@ -483,6 +488,13 @@ export function reorgEventToSourceEvent(evt: ReorgEvent, source: 'coinset'): Sou
     ts_high_unix: null,
     old_header_hash: evt.old_header_hash,
     new_header_hash: evt.new_header_hash,
+    // The Coinset poller already has the full block_record on the ReorgEvent
+    // (from get_block_records); propagate it through so the email body keeps
+    // the rich record even after going through the dual-source coordinator.
+    old_block_record:
+      typeof evt.old_block_record === 'object' && evt.old_block_record !== null
+        ? (evt.old_block_record as Record<string, unknown>)
+        : null,
   };
 }
 
@@ -499,6 +511,7 @@ function localReorgToSourceEvent(r: LocalReorg & { detected_at_iso: string }): S
     ts_high_unix: r.ts_high_unix,
     old_header_hash: r.old_hash,
     new_header_hash: r.new_hash,
+    old_block_record: r.old_block_record,
   };
 }
 
@@ -513,7 +526,10 @@ function synthesizeReorgEventFromLocal(
     depth: r.depth,
     max_depth: r.depth,
     blocks_from_peak: 0,
-    old_block_record: { timestamp: r.ts_high_unix ?? null },
+    // Prefer the full decoded BlockRecord from the bash script when present;
+    // fall back to a minimal {timestamp} object (the old behavior) so the
+    // email still has at least the tx-block indicator.
+    old_block_record: r.old_block_record ?? { timestamp: r.ts_high_unix ?? null },
   };
 }
 
@@ -634,6 +650,10 @@ export function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
     depth: s.depth,
     max_depth: s.max_depth,
     blocks_from_peak: 0,
-    old_block_record: { timestamp: s.ts_high_unix ?? null },
+    // Prefer the full BlockRecord plumbed through SourceEvent (from either
+    // the Coinset RPC response or the local DB via the bash script's
+    // chia python helper). Fall back to {timestamp} so the email's
+    // tx/non-tx detection still works.
+    old_block_record: s.old_block_record ?? { timestamp: s.ts_high_unix ?? null },
   };
 }

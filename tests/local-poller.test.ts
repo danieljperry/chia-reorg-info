@@ -249,6 +249,60 @@ describe('validateLocalScanResult', () => {
     expect(result?.reorgs[0]?.new_hash).toBeNull();
   });
 
+  it('accepts old_block_record as an object', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: { weight: 123, signage_point_index: 49, timestamp: null },
+      }],
+    };
+    const result = validateLocalScanResult(v);
+    expect(result?.reorgs[0]?.old_block_record).toEqual({
+      weight: 123,
+      signage_point_index: 49,
+      timestamp: null,
+    });
+  });
+
+  it('accepts old_block_record as null', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: null,
+      }],
+    };
+    expect(validateLocalScanResult(v)).not.toBeNull();
+  });
+
+  it('treats missing old_block_record as null (older bash script versions)', () => {
+    const result = validateLocalScanResult(valid);
+    expect(result?.reorgs[0]?.old_block_record).toBeNull();
+  });
+
+  it('rejects old_block_record as an array (must be object or null)', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: [1, 2, 3],
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
+  it('rejects old_block_record as a string', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: '{"weight":123}',
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
   it('rejects a non-hex string old_hash (defense in depth against tampered DB)', () => {
     const v = {
       ...valid,

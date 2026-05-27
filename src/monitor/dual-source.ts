@@ -46,6 +46,13 @@ export type SourceEvent = {
   old_header_hash?: string | null;
   /** Canonical block's header_hash at the cluster top, same encoding. */
   new_header_hash?: string | null;
+  /** Decoded BlockRecord of the orphan at the cluster top (the ~25 fields
+   *  Chia's BlockRecord exposes: weight, total_iters, signage_point_index,
+   *  VDF outputs, reward_claims_incorporated, etc.). Used by the alert
+   *  email body so recipients see the full record instead of just the
+   *  timestamp. Null/undefined when the source can't supply it (e.g.
+   *  older bash script, chia-blockchain not importable, etc.). */
+  old_block_record?: Record<string, unknown> | null;
 };
 
 export type DispatchOutcome =

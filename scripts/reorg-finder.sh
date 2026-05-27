@@ -585,6 +585,36 @@ if [[ "$JSON_OUT" == "true" ]]; then
   # DB because the whole reason `high` is in our cluster is that it has
   # multiple block records. Hashes are returned without `0x` prefix and
   # lowercased; either may be null if the row vanishes mid-scan (defensive).
+  #
+  # Additionally, decode the orphan's full BlockRecord (the same ~25 fields
+  # coinset's API returns: weight, total_iters, signage_point_index, VDF
+  # outputs, reward_claims_incorporated, etc.) so the reorg-alert email
+  # body can include them instead of just the timestamp. Done in one batch
+  # Python invocation to amortize chia-blockchain import overhead. Falls
+  # back to null per-cluster when decoding fails.
+  BR_HELPER="$(dirname "$SCRIPT_PATH")/_decode_block_record.py"
+  br_pairs=""
+  declare -A _BR_OLD_HASH=()
+  for i in "${!CLUSTER_HIGHS[@]}"; do
+    _h="${CLUSTER_HIGHS[$i]}"
+    _oh=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $_h AND in_main_chain = 0 LIMIT 1;")
+    if [[ -n "$_oh" ]]; then
+      br_pairs+="${_h}	${_oh}"$'\n'
+      _BR_OLD_HASH[$_h]="$_oh"
+    fi
+  done
+  BR_TSV=""
+  if [[ -n "$br_pairs" && -r "$BR_HELPER" ]]; then
+    BR_TSV=$(printf '%s' "$br_pairs" | "$CHIA_PYTHON_BIN" "$BR_HELPER" "$DB_PATH" 2>/dev/null || true)
+  fi
+  _br_json_for() {
+    local h=$1 hh=$2 v
+    v=$(awk -F '\t' -v h="$h" -v hh="$hh" '$1 == h && $2 == hh { print $3; exit }' <<< "$BR_TSV")
+    [[ -z "$v" ]] && v="null"
+    printf '%s' "$v"
+  }
+
   json_reorgs=""
   for i in "${!CLUSTER_LOWS[@]}"; do
     low="${CLUSTER_LOWS[$i]}"
@@ -598,8 +628,11 @@ if [[ "$JSON_OUT" == "true" ]]; then
     fi
     [[ -z "$ts_low" ]] && ts_low="null"
     [[ -z "$ts_high" ]] && ts_high="null"
-    old_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
-      "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
+    old_hash="${_BR_OLD_HASH[$high]:-}"
+    if [[ -z "$old_hash" ]]; then
+      old_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
+        "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 0 LIMIT 1;")
+    fi
     new_hash=$(sqlite3 "file:${DB_PATH}?mode=ro" \
       "SELECT lower(hex(header_hash)) FROM full_blocks WHERE height = $high AND in_main_chain = 1 LIMIT 1;")
     # Safe to wrap in literal quotes without escaping: lower(hex(...)) returns
@@ -607,8 +640,9 @@ if [[ "$JSON_OUT" == "true" ]]; then
     # other column types — change to a proper JSON-escaper if you do.
     if [[ -n "$old_hash" ]]; then old_hash_json="\"$old_hash\""; else old_hash_json="null"; fi
     if [[ -n "$new_hash" ]]; then new_hash_json="\"$new_hash\""; else new_hash_json="null"; fi
+    obr_json=$(_br_json_for "$high" "$old_hash")
     if [[ -n "$json_reorgs" ]]; then json_reorgs+=","; fi
-    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high,\"old_hash\":$old_hash_json,\"new_hash\":$new_hash_json}"
+    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high,\"old_hash\":$old_hash_json,\"new_hash\":$new_hash_json,\"old_block_record\":$obr_json}"
   done
   printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[%s]}\n' \
     "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT" "$json_reorgs"
