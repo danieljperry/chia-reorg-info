@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: lint + typecheck + test + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # sqlite3 CLI is required by tests/reorg-finder.e2e.test.ts and
+      # tests/python-helpers.test.ts to build synthetic chia full_blocks
+      # fixtures. Ubuntu runners include it by default but we install
+      # defensively so the workflow doesn't silently rely on the runner image.
+      - name: Install sqlite3 CLI
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests with coverage
+        run: npm run test:coverage
+
+      # Surface the coverage summary in the workflow log so it's visible
+      # without downloading the artifact. The JSON summary is more compact
+      # than the HTML report.
+      - name: Print coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            node -e '
+              const s = require("./coverage/coverage-summary.json").total;
+              const fmt = (m) => `${m.pct.toFixed(2)}% (${m.covered}/${m.total})`;
+              console.log("Coverage:");
+              console.log("  Statements: " + fmt(s.statements));
+              console.log("  Branches:   " + fmt(s.branches));
+              console.log("  Functions:  " + fmt(s.functions));
+              console.log("  Lines:      " + fmt(s.lines));
+            '
+          else
+            echo "No coverage-summary.json produced."
+          fi
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30

@@ -384,12 +384,15 @@ A "Skipping recipient (threshold not met)" line is logged when a re-org is too s
 ## Development
 
 ```bash
-npm test           # run the full vitest suite
-npm run lint       # eslint
-npm run typecheck  # tsc --noEmit
-npm run dev        # tsx src/index.ts (run from source)
-npm run build      # compile to dist/
+npm test                 # run the full vitest suite
+npm run test:coverage    # vitest + v8 coverage report (text + HTML in coverage/)
+npm run lint             # eslint
+npm run typecheck        # tsc --noEmit
+npm run dev              # tsx src/index.ts (run from source)
+npm run build            # compile to dist/
 ```
+
+CI runs lint, typecheck, and the test suite with coverage on every push to `main` and on PRs — see `.github/workflows/ci.yml`. The coverage HTML report is uploaded as a workflow artifact (`coverage-report`).
 
 ## License
 
