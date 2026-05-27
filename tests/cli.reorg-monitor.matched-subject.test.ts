@@ -150,6 +150,146 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).toContain('1748097540');
   });
 
+  it('LARGE old_block_record (>= 250 KiB) is dropped with size message; no attachment', async () => {
+    mockSendMail.mockClear();
+    // Build a payload that JSON.stringify(null, 2)s to >= 256000 bytes.
+    // A 200-element array of long-ish strings handily clears the limit.
+    const largeArray = Array.from({ length: 5000 }, (_, i) => ({
+      idx: i,
+      data: 'x'.repeat(60),
+    }));
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-27T00:00:00Z',
+      ts_high_unix: 1700000000, // tx block
+      old_block_record: { timestamp: 1700000000, reward_claims_incorporated: largeArray },
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 100, {});
+    const call = mockSendMail.mock.calls[0]![0] as {
+      text: string;
+      attachments?: unknown[];
+    };
+    expect(call.text).toMatch(/Block record not included due to its large size: \d+\.\d+ KiB/);
+    expect(call.text).not.toContain('reward_claims_incorporated');
+    expect(call.attachments).toBeUndefined();
+  });
+
+  it('MEDIUM old_block_record (25 KiB <= size < 250 KiB) is sent as attachment', async () => {
+    mockSendMail.mockClear();
+    // Build a payload between 25 and 250 KiB. ~500 items of ~80 bytes each.
+    const mediumArray = Array.from({ length: 500 }, (_, i) => ({
+      idx: i,
+      data: 'y'.repeat(60),
+    }));
+    const localSource = {
+      source: 'local' as const,
+      low: 200,
+      high: 200,
+      settle_at: 200,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-27T00:00:00Z',
+      ts_high_unix: 1700000000,
+      old_block_record: { timestamp: 1700000000, items: mediumArray },
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 200, {});
+    const call = mockSendMail.mock.calls[0]![0] as {
+      text: string;
+      attachments?: Array<{ filename: string; content: string }>;
+    };
+    expect(call.text).toContain('block-200-record.json');
+    expect(call.text).toMatch(/\d+\.\d+ KiB/);
+    expect(call.text).not.toContain('"items"'); // contents NOT inline
+    expect(call.attachments).toBeDefined();
+    expect(call.attachments).toHaveLength(1);
+    expect(call.attachments![0]!.filename).toBe('block-200-record.json');
+    // The attachment content should be the JSON we'd otherwise have inlined.
+    expect(call.attachments![0]!.content).toContain('"items"');
+  });
+
+  it('SMALL old_block_record (< 25 KiB) stays inline; no attachment', async () => {
+    mockSendMail.mockClear();
+    const localSource = {
+      source: 'local' as const,
+      low: 300,
+      high: 300,
+      settle_at: 300,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-27T00:00:00Z',
+      ts_high_unix: 1700000000,
+      old_block_record: {
+        timestamp: 1700000000,
+        weight: 12345,
+        signage_point_index: 49,
+      },
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 300, {});
+    const call = mockSendMail.mock.calls[0]![0] as {
+      text: string;
+      attachments?: unknown[];
+    };
+    expect(call.text).toContain('"weight": 12345');
+    expect(call.text).toContain('"signage_point_index": 49');
+    expect(call.text).toContain('The original block was a tx block with the following contents:');
+    expect(call.attachments).toBeUndefined();
+  });
+
+  it('multiple reorgs with mixed sizes each get their own attachment / inline / drop treatment', async () => {
+    mockSendMail.mockClear();
+    const tiny = { timestamp: 1, w: 1 };
+    const medium = {
+      timestamp: 1,
+      items: Array.from({ length: 500 }, (_, i) => ({ i, d: 'z'.repeat(60) })),
+    };
+    const huge = {
+      timestamp: 1,
+      bigarr: Array.from({ length: 5000 }, (_, i) => ({ i, d: 'q'.repeat(60) })),
+    };
+    const sources = [
+      { height: 1000, record: tiny },
+      { height: 1001, record: medium },
+      { height: 1002, record: huge },
+    ];
+    const events = sources.map((s) =>
+      synthesizeReorgEventFromSource({
+        source: 'local' as const,
+        low: s.height,
+        high: s.height,
+        settle_at: s.height,
+        depth: 1,
+        max_depth: 1,
+        detected_at_iso: '2026-05-27T00:00:00Z',
+        ts_high_unix: 1700000000,
+        old_block_record: s.record,
+      })
+    );
+    await sendReorgAlert('alice@example.com', 'mainnet', events, 1002, {});
+    const call = mockSendMail.mock.calls[0]![0] as {
+      text: string;
+      attachments?: Array<{ filename: string; content: string }>;
+    };
+    // Tiny: inline
+    expect(call.text).toContain('"w": 1');
+    // Medium: attached, not inline
+    expect(call.text).toContain('block-1001-record.json');
+    expect(call.text).not.toContain('"items"');
+    // Huge: dropped with size message
+    expect(call.text).toMatch(/Block record not included due to its large size/);
+    expect(call.text).not.toContain('"bigarr"');
+    // Exactly one attachment (for the medium one)
+    expect(call.attachments).toHaveLength(1);
+    expect(call.attachments![0]!.filename).toBe('block-1001-record.json');
+  });
+
   it('local source with full old_block_record propagates it into the email body', async () => {
     mockSendMail.mockClear();
     const fullRecord = {

@@ -303,6 +303,105 @@ describe('validateLocalScanResult', () => {
     expect(validateLocalScanResult(v)).toBeNull();
   });
 
+  // ---- BlockRecord field-level validation (L-6 fix) ----
+  // Defense in depth against a tampered DB or malicious chia helper output:
+  // even though JSON.stringify safely escapes any string content, a record
+  // with negative weight / NaN timestamp / control chars would still mislead
+  // the email recipient. The validator rejects the entire payload when any
+  // known BlockRecord field has the wrong type.
+
+  function payloadWithBR(br: object): object {
+    return {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: br,
+      }],
+    };
+  }
+
+  it('accepts a well-formed BlockRecord with known fields', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      height: 100,
+      weight: 50000,
+      total_iters: 999999,
+      signage_point_index: 49,
+      timestamp: 1700000000,
+      fees: 1000,
+      overflow: false,
+      header_hash: '0x' + 'a'.repeat(64),
+      farmer_puzzle_hash: '0x' + 'b'.repeat(64),
+    }))).not.toBeNull();
+  });
+
+  it('accepts a BlockRecord with extra unknown fields (forward-compat)', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      weight: 1, future_chia_v3_field: { nested: 'whatever' },
+    }))).not.toBeNull();
+  });
+
+  it('accepts a BlockRecord with null nullable fields', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      timestamp: null, fees: null, prev_transaction_block_height: null,
+    }))).not.toBeNull();
+  });
+
+  it('rejects a BlockRecord with negative weight', () => {
+    expect(validateLocalScanResult(payloadWithBR({ weight: -1 }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with non-integer weight (float)', () => {
+    expect(validateLocalScanResult(payloadWithBR({ weight: 3.14 }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with non-integer weight (string)', () => {
+    expect(validateLocalScanResult(payloadWithBR({ weight: '50000' }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with NaN total_iters', () => {
+    expect(validateLocalScanResult(payloadWithBR({ total_iters: NaN }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with Infinity weight', () => {
+    expect(validateLocalScanResult(payloadWithBR({ weight: Infinity }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with non-boolean overflow', () => {
+    expect(validateLocalScanResult(payloadWithBR({ overflow: 'true' }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with a control character in header_hash', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      header_hash: '0x' + 'a'.repeat(30) + '\n' + 'a'.repeat(32),
+    }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with null byte in farmer_puzzle_hash', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      farmer_puzzle_hash: '0x\x00' + 'a'.repeat(62),
+    }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with non-string header_hash', () => {
+    expect(validateLocalScanResult(payloadWithBR({ header_hash: 12345 }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with carriage return in a hash string', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      header_hash: '0x' + 'a'.repeat(30) + '\r' + 'a'.repeat(32),
+    }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with tab in a hash string', () => {
+    expect(validateLocalScanResult(payloadWithBR({
+      header_hash: '0x' + 'a'.repeat(30) + '\t' + 'a'.repeat(32),
+    }))).toBeNull();
+  });
+
+  it('rejects a BlockRecord with negative timestamp', () => {
+    expect(validateLocalScanResult(payloadWithBR({ timestamp: -1 }))).toBeNull();
+  });
+
   it('rejects a non-hex string old_hash (defense in depth against tampered DB)', () => {
     const v = {
       ...valid,

@@ -103,6 +103,18 @@ export async function sendReorgAlert(
       ? `A re-org of depth ${depthLabel} was detected on the Chia ${network} blockchain${uncertainNote}.`
       : `${clusterCount} re-orgs were detected on the Chia ${network} blockchain (max depth ${depthLabel})${uncertainNote}.`;
 
+  // Size tiers for the per-block JSON dump. Coarse buckets, KiB-based.
+  // Below INLINE_LIMIT: paste contents directly into the body (status quo).
+  // Below ATTACHMENT_LIMIT: attach as block-<height>-record.json and reference
+  //   it from the body, so the user can open it if they want detail but the
+  //   email body stays compact.
+  // Above ATTACHMENT_LIMIT: drop the contents entirely; body shows just the
+  //   size. Defends recipients from "denial-of-inbox" via outsized BlockRecord
+  //   payloads (e.g. a malicious chain producing huge reward_claims arrays).
+  const INLINE_LIMIT_BYTES = 25 * 1024;
+  const ATTACHMENT_LIMIT_BYTES = 250 * 1024;
+  const attachments: Array<{ filename: string; content: string }> = [];
+
   const blockSections = sorted
     .map((reorg, i) => {
       const isTxBlock =
@@ -115,13 +127,7 @@ export async function sendReorgAlert(
       // skip the JSON body and just note the block type to keep the email
       // compact.
       const origBlockSection = isTxBlock
-        ? [
-            `  The original block was a tx block with the following contents:`,
-            JSON.stringify(reorg.old_block_record, null, 2)
-              .split('\n')
-              .map((line) => `  ${line}`)
-              .join('\n'),
-          ]
+        ? buildTxBlockSection(reorg, attachments, INLINE_LIMIT_BYTES, ATTACHMENT_LIMIT_BYTES)
         : [`  The original block was a non-tx block (no canonical contents available).`];
       return [
         `Block ${i + 1}:`,
@@ -162,13 +168,75 @@ export async function sendReorgAlert(
     depth_range: depthLabel,
     peak_height: peakHeight,
     reorg_heights: sorted.map((r) => r.height),
+    attachment_count: attachments.length,
+    attachment_names: attachments.map((a) => a.filename),
   });
 
   try {
-    await transporter.sendMail({ from, to, subject, text });
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    });
     log('info', 'Re-org alert email sent', { to, subject });
   } catch (err) {
     log('error', 'Re-org alert email failed', { to, subject, error: safeMessage(err) });
     throw err;
   }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)} KiB`;
+  return `${(kib / 1024).toFixed(1)} MiB`;
+}
+
+/**
+ * Build the per-reorg "original block contents" section for tx blocks,
+ * picking among three size-tiered presentations:
+ *   1. Below `inlineLimit`: paste the indented JSON inline (status quo).
+ *   2. Between `inlineLimit` and `attachmentLimit`: push an attachment
+ *      onto `attachments` and reference it from the body.
+ *   3. At or above `attachmentLimit`: omit the contents; body just notes
+ *      that the record was dropped and reports its size.
+ *
+ * Sizing uses UTF-8 byte count via Buffer.byteLength — the actual mail
+ * transfer encoding is UTF-8, so JS-string `.length` would underreport
+ * for any multi-byte characters in the BlockRecord.
+ */
+function buildTxBlockSection(
+  reorg: ReorgEvent,
+  attachments: Array<{ filename: string; content: string }>,
+  inlineLimit: number,
+  attachmentLimit: number
+): string[] {
+  const jsonStr = JSON.stringify(reorg.old_block_record, null, 2);
+  const sizeBytes = Buffer.byteLength(jsonStr, 'utf8');
+
+  if (sizeBytes < inlineLimit) {
+    return [
+      `  The original block was a tx block with the following contents:`,
+      jsonStr
+        .split('\n')
+        .map((line) => `  ${line}`)
+        .join('\n'),
+    ];
+  }
+
+  if (sizeBytes < attachmentLimit) {
+    const filename = `block-${reorg.height}-record.json`;
+    attachments.push({ filename, content: jsonStr });
+    return [
+      `  The original block was a tx block. Its contents are attached as`,
+      `  ${filename} (${formatSize(sizeBytes)}).`,
+    ];
+  }
+
+  return [
+    `  The original block was a tx block.`,
+    `  Block record not included due to its large size: ${formatSize(sizeBytes)}.`,
+  ];
 }

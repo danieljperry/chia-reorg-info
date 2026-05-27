@@ -75,6 +75,82 @@ function isNonNegInt(v: unknown): v is number {
 }
 
 /**
+ * Tighter validation of the decoded BlockRecord embedded in
+ * `LocalReorg.old_block_record`. The validator at the LocalScanResult level
+ * only checks that the field is an object — but the BlockRecord then flows
+ * verbatim into the email body via JSON.stringify, and a tampered DB could
+ * produce values that, while safely encoded by JSON.stringify, would still
+ * mislead the recipient (e.g. negative weights, control chars in strings,
+ * non-finite numbers).
+ *
+ * Strategy: validate the well-known fields when present; accept additional
+ * fields as-is for forward-compatibility with chia version changes. If any
+ * known field has the wrong type, reject the whole BlockRecord.
+ *
+ * The hash-format check (isHex32) is intentionally NOT applied here because
+ * BlockRecord stores hashes with `0x` prefix (BlockRecord.to_json_dict()
+ * convention) — a separate check at line level is sufficient.
+ */
+function isFiniteNonNegInt(v: unknown): boolean {
+  return typeof v === 'number' && Number.isInteger(v) && Number.isFinite(v) && v >= 0;
+}
+function isPrintableString(v: unknown): boolean {
+  // Rejects all C0 control chars (0x00-0x1f) and DEL (0x7f). For
+  // BlockRecord hash and puzzle-hash fields, none of these should ever
+  // appear. Includes \t, \n, \r — defense in depth against email-header
+  // injection vectors even though JSON.stringify would also escape them.
+  // eslint-disable-next-line no-control-regex
+  return typeof v === 'string' && !/[\x00-\x1f\x7f]/.test(v);
+}
+export function validateBlockRecordShape(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
+  const r = raw as Record<string, unknown>;
+  // Numeric fields — when present, must be finite non-negative integers.
+  // Some fields may be null (e.g. timestamp on non-tx blocks).
+  const numericFields = [
+    'height',
+    'weight',
+    'total_iters',
+    'signage_point_index',
+    'required_iters',
+    'deficit',
+    'sub_slot_iters',
+  ] as const;
+  for (const f of numericFields) {
+    if (f in r && r[f] !== null && !isFiniteNonNegInt(r[f])) return false;
+  }
+  // Nullable numeric fields.
+  const nullableNumericFields = [
+    'timestamp',
+    'fees',
+    'prev_transaction_block_height',
+  ] as const;
+  for (const f of nullableNumericFields) {
+    if (f in r && r[f] !== null && !isFiniteNonNegInt(r[f])) return false;
+  }
+  // Boolean fields.
+  if ('overflow' in r && r.overflow !== null && typeof r.overflow !== 'boolean') {
+    return false;
+  }
+  // String fields (hashes, addresses) — reject control characters that
+  // could mislead a recipient if rendered in the body. JSON.stringify
+  // would escape them, but the defense-in-depth check is cheap.
+  const stringFields = [
+    'header_hash',
+    'prev_hash',
+    'challenge_block_info_hash',
+    'reward_infusion_new_challenge',
+    'prev_transaction_block_hash',
+    'farmer_puzzle_hash',
+    'pool_puzzle_hash',
+  ] as const;
+  for (const f of stringFields) {
+    if (f in r && r[f] !== null && !isPrintableString(r[f])) return false;
+  }
+  return true;
+}
+
+/**
  * Validate the bash script's JSON output against the LocalScanResult shape.
  * Returns the typed value on success, null on any shape mismatch.
  *
@@ -114,12 +190,13 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
     if (new_hash !== null && (typeof new_hash !== 'string' || !isHex32(new_hash))) return null;
     // old_block_record is optional. When present it must be a plain object
     // (the decoded BlockRecord.to_json_dict() from the chia python helper)
-    // or null. We don't deep-validate field-by-field — it's pass-through
-    // data destined for JSON.stringify in the email body.
+    // or null. We deep-check the well-known BlockRecord fields via
+    // validateBlockRecordShape (defense in depth against a tampered DB
+    // producing junk that would otherwise render into the email body).
     const obr_raw = e.old_block_record === undefined ? null : e.old_block_record;
     let old_block_record: Record<string, unknown> | null = null;
     if (obr_raw !== null) {
-      if (typeof obr_raw !== 'object' || Array.isArray(obr_raw)) return null;
+      if (!validateBlockRecordShape(obr_raw)) return null;
       old_block_record = obr_raw as Record<string, unknown>;
     }
     reorgs.push({
