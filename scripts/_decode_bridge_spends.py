@@ -200,38 +200,49 @@ def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
     gen_bytes = bytes(block.transactions_generator)
     max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
 
-    # Each attempt is a (label, callable). Order matters:
+    # The aggregated BLS signature is right there on the FullBlock for tx
+    # blocks. Using it makes both v1 and v2 happy. For non-tx blocks (no
+    # transactions_info) we shouldn't even be here since
+    # transactions_generator would be None, but be defensive.
+    real_sig: Any = None
+    if block.transactions_info is not None:
+        real_sig = getattr(block.transactions_info, "aggregated_signature", None)
+    fallback_sig: Any = _ZERO_G2 if _ZERO_G2 is not None else bytes(96)
+
+    # Each attempt is a (label, callable). Both v1 and v2 take the same
+    # 7-arg shape on modern chia_rs versions, so we don't really care
+    # which we call — we try v1 first since it's the "block validation"
+    # entry point, fall back to v2 (mempool-mode validation) when v1
+    # isn't exported.
     #
-    #   1. v1 first when available — `run_block_generator` doesn't do BLS
-    #      signature validation, so it succeeds on any block whose CLVM
-    #      runs cleanly. This is what we want: we're extracting spends,
-    #      not validating consensus.
-    #   2. v2 second — fall back if v1 isn't in this chia_rs version.
-    #      v2 requires a real signature; we pass a zero G2Element which
-    #      will fail BLS validation for blocks that actually have AGG_SIG
-    #      conditions, returning (err_code, None) instead of conds.
+    # The legacy 5-arg / 4-arg shapes catch much older chia_rs versions
+    # that some users may still have installed.
     attempts: list[tuple[str, Any]] = []
 
-    if _run_generator_v1 is not None:
+    def _add_modern(label_prefix: str, fn):
+        if real_sig is not None:
+            attempts.append((
+                f"{label_prefix}/7-arg with real signature",
+                lambda: fn(gen_bytes, refs, max_cost, 0, real_sig, None, _DEFAULT_CONSTANTS),
+            ))
         attempts.append((
-            "v1/5-arg (no BLS check)",
+            f"{label_prefix}/7-arg with zero G2Element signature",
+            lambda: fn(gen_bytes, refs, max_cost, 0, fallback_sig, None, _DEFAULT_CONSTANTS),
+        ))
+
+    if _run_generator_v1 is not None:
+        _add_modern("v1", _run_generator_v1)
+        attempts.append((
+            "v1/5-arg (legacy)",
             lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0, _DEFAULT_CONSTANTS),
         ))
         attempts.append((
-            "v1/4-arg (no BLS check)",
+            "v1/4-arg (oldest)",
             lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0),
         ))
 
     if _run_generator_v2 is not None:
-        sig_g2 = _ZERO_G2 if _ZERO_G2 is not None else bytes(96)
-        attempts.append((
-            "v2/7-arg with G2Element signature (BLS check, zero sig)",
-            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, sig_g2, None, _DEFAULT_CONSTANTS),
-        ))
-        attempts.append((
-            "v2/7-arg with bytes signature (BLS check, zero sig)",
-            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, bytes(96), None, _DEFAULT_CONSTANTS),
-        ))
+        _add_modern("v2", _run_generator_v2)
 
     failures: list[str] = []
     for label, fn in attempts:
