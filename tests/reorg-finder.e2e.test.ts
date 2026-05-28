@@ -269,16 +269,39 @@ describe('reorg-finder.sh end-to-end (synthetic DB)', () => {
   // doesn't have chia FullBlock blobs — the helper would fall through
   // to its "couldn't decompress" path, which is fine for these tests.
 
-  it('-b + -qq is rejected with the exact error message', () => {
-    const r = run(['-b', '-qq']);
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/-b\/--bridge is incompatible with -qq/);
+  it('-b + -qq is now ACCEPTED and emits the Bridge Info section at full detail', () => {
+    // Spec change: -qq used to reject -b. Now it's allowed; the bridge
+    // section comes through with the same detail as no-quiet mode. -qq's
+    // suppression of the per-reorg list still applies (we get only the
+    // one-line count + Bridge Info).
+    const db = buildDb(
+      dir,
+      Array.from({ length: 5 }, (_, i) => ({
+        height: 100 + i,
+        header_hash: `a${i}`.padEnd(64, '0'),
+        in_main_chain: 1 as const,
+      }))
+    );
+    const r = run(['-d', db, '-e', '104', '-n', '5', '--peak-from', 'db', '-b', '-qq']);
+    expect(r.status).toBe(0);
+    // -qq's normal output: just the one-line count.
+    expect(r.stdout).toMatch(/Found 0 reorgs of at least 1 blocks/);
+    // Bridge Info still appears.
+    expect(r.stdout).toContain('Bridge Info:');
+    expect(r.stdout).toContain(
+      'No bridge transfers were found in any reorged blocks from this query.'
+    );
+    // Per-block detail (which -q would also suppress) is NOT present.
+    expect(r.stdout).not.toContain('Per-block detail');
   });
 
-  it('--bridge + -qq is rejected (long form too)', () => {
-    const r = run(['--bridge', '-qq']);
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/-b\/--bridge is incompatible with -qq/);
+  it('--bridge + -qq is also accepted (long form)', () => {
+    const db = buildDb(dir, [
+      { height: 100, header_hash: 'a0'.padEnd(64, '0'), in_main_chain: 1 },
+    ]);
+    const r = run(['-d', db, '-e', '100', '-n', '1', '--peak-from', 'db', '--bridge', '-qq']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('Bridge Info:');
   });
 
   it('-b on a clean DB (no reorgs) emits the "no transfers" line', () => {
