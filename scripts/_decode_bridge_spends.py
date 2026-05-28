@@ -202,9 +202,9 @@ _EXTRA_TEMPLATES: list[tuple[str, bytes | None]] = [
     ),
     (
         "nft_ownership_layer",
-        _safe_mod_hash(
-            "chia.wallet.nft_wallet.nft_puzzles", "NFT_OWNERSHIP_LAYER_MOD"
-        )
+        # Chia's attribute is NFT_OWNERSHIP_LAYER (no _MOD suffix) — different
+        # from NFT_STATE_LAYER_MOD just above. Took an iteration to spot.
+        _safe_mod_hash("chia.wallet.nft_wallet.nft_puzzles", "NFT_OWNERSHIP_LAYER")
         or _safe_mod_hash("chia.wallet.puzzles.nft_ownership_layer", "MOD"),
     ),
     (
@@ -225,6 +225,21 @@ _EXTRA_TEMPLATES: list[tuple[str, bytes | None]] = [
         _safe_mod_hash("chia.wallet.puzzles.cc_loader", "CC_MOD"),
     ),
 ]
+
+# Warp.green outbound bridge encoder. Identified by observation:
+# 1238 spent canonical-chain coins with the same puzzle_hash all created
+# exactly one CREATE_COIN with the bridge message puzzle hash and memos
+# of the form [chain_tag, dest_address, dest_token_contract, ...]. The
+# outer mod hash is stable across all instances; the destination details
+# vary per spend. Curried args layout (5 args):
+#   [0] CAT_MOD_HASH (constant)
+#   [1] 32-byte nonce / per-asset key
+#   [2] bridge message puzzle hash (= the configured -b target)
+#   [3] destination chain tag (3-byte ASCII, e.g. "bse" for Base)
+#   [4] destination address (20 bytes for ETH-family chains)
+_WARP_OUTBOUND_MOD_HASH = bytes.fromhex(
+    "cf5743483ed4d0f5536a11877f5b15629b04e6bf34943843c5cad97ce61f2505"
+)
 
 
 def _classify_puzzle(
@@ -327,6 +342,39 @@ def _classify_puzzle(
     for label, extra_hash in _EXTRA_TEMPLATES:
         if extra_hash is not None and mod_hash == extra_hash:
             return label, None, f"mod_hash={mod_short} matches {label}"
+
+    if mod_hash == _WARP_OUTBOUND_MOD_HASH:
+        # Curried args: [CAT_MOD, nonce, bridge_target, chain_tag, dest_addr].
+        # Extract chain + recipient so asset_id renders as e.g.
+        # "bse:0x8412f06e811b858ea9edcf81a5e5882dbf70ac96" — that's all
+        # the routing info a re-org observer needs.
+        try:
+            args_list = list(curried_args.as_iter())
+            if len(args_list) >= 5:
+                chain_atom = bytes(args_list[3].as_atom() or b"")
+                recipient = bytes(args_list[4].as_atom() or b"")
+                chain_tag = (
+                    chain_atom.decode("ascii", errors="replace") if chain_atom else "?"
+                )
+                dest_id = f"{chain_tag}:0x{recipient.hex()}" if recipient else chain_tag
+                return (
+                    "warp_outbound",
+                    dest_id,
+                    f"mod_hash={mod_short} matches warp.green outbound bridge "
+                    f"(destination: {dest_id})",
+                )
+        except Exception as e:
+            return (
+                "warp_outbound",
+                None,
+                f"mod_hash={mod_short} matches warp.green outbound but args parse failed: "
+                f"{type(e).__name__}: {e}",
+            )
+        return (
+            "warp_outbound",
+            None,
+            f"mod_hash={mod_short} matches warp.green outbound (unexpected arg count)",
+        )
 
     # No template matched. Surface the FULL mod_hash so the user can
     # identify it externally (lookup against known protocols, ask the

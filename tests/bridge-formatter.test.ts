@@ -244,6 +244,38 @@ describe('_format_bridge_info.py', () => {
     expect(r.stdout).not.toMatch(/asset_id/);
   });
 
+  it('detailed: warp_outbound renders with chain:address destination in asset_id', () => {
+    const dest = 'bse:0x8412f06e811b858ea9edcf81a5e5882dbf70ac96';
+    const payload = {
+      matches: [
+        {
+          height: 8682028,
+          header_hash: '20'.repeat(32),
+          timestamp: 1777965346,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xca07', puzzle_hash: '0x6d64', amount: 1000000000 },
+              asset_type: 'warp_outbound',
+              asset_id: dest,
+              classification_note: `mod_hash=cf57434…; matches warp.green outbound bridge (destination: ${dest})`,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(
+      new RegExp(`asset: {7}warp_outbound \\(asset_id: ${dest.replace(/:/g, ':')}\\)`)
+    );
+    expect(r.stdout).toMatch(/matches warp\.green outbound bridge/);
+  });
+
   it('detailed: unknown_curried renders with mod_hash in asset_id slot', () => {
     const modHash = '0x' + 'cf'.repeat(32);
     const payload = {
