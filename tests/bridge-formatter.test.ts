@@ -244,6 +244,37 @@ describe('_format_bridge_info.py', () => {
     expect(r.stdout).not.toMatch(/asset_id/);
   });
 
+  it('detailed: unknown_curried renders with mod_hash in asset_id slot', () => {
+    const modHash = '0x' + 'cf'.repeat(32);
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'unknown_curried',
+              asset_id: modHash,
+              classification_note: `uncurried mod_hash=${modHash}; no template match`,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(
+      new RegExp(`asset: {7}unknown_curried \\(asset_id: ${modHash}\\)`)
+    );
+  });
+
   it('detailed: spend with classification_note prints a "note:" line under asset', () => {
     const payload = {
       matches: [
