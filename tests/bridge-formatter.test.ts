@@ -160,6 +160,90 @@ describe('_format_bridge_info.py', () => {
     expect(r.stdout).toMatch(/matched on: {2}puzzle_hash/);
   });
 
+  it('detailed: CAT asset renders with asset_id (TAIL hash)', () => {
+    const tailHash = '0x' + 'ee'.repeat(32);
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'cat',
+              asset_id: tailHash,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(new RegExp(`asset: {7}cat \\(asset_id: ${tailHash}\\)`));
+  });
+
+  it('detailed: singleton asset renders with launcher_id', () => {
+    const launcherId = '0x' + 'dd'.repeat(32);
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1 },
+              asset_type: 'singleton',
+              asset_id: launcherId,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(new RegExp(`asset: {7}singleton \\(asset_id: ${launcherId}\\)`));
+  });
+
+  it('detailed: xch asset renders without asset_id (no parens)', () => {
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'xch',
+              asset_id: null,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/asset: {7}xch$/m);
+    expect(r.stdout).not.toMatch(/asset_id/);
+  });
+
   it('detailed: byte-search-only match reports "Spend details: unavailable" with the error', () => {
     const payload = {
       matches: [
