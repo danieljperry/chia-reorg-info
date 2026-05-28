@@ -115,6 +115,7 @@ describe('_format_bridge_info.py', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/height=100/);
     expect(r.stdout).toMatch(/amount=unknown/);
+    expect(r.stdout).toMatch(/asset=bridge\?/);
     expect(r.stdout).toMatch(/chia not importable/);
   });
 

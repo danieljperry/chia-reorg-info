@@ -60,12 +60,15 @@ def _emit_quiet(matches):
                 print(f"  height={height}  ts={ts_disp}  {amount_str}  asset={asset}")
         else:
             # Byte-search hit only; generator unparsed (chia missing or
-            # ref blocks unavailable). Report what we know.
+            # ref blocks unavailable). We KNOW the configured bridge hash
+            # was found in the block — we just can't classify whether it
+            # was a spend / create / hint. Mark with `bridge?` to
+            # distinguish from a true unknown.
             matched = ",".join(m.get("byte_matched_hashes") or [])
             err = m.get("generator_error") or "no spend detail"
             print(
                 f"  height={height}  ts={ts_disp}  amount=unknown  "
-                f"asset=unknown  matched_hash={_short(matched, 10)}  "
+                f"asset=bridge?  matched_hash={_short(matched, 10)}  "
                 f"(no spend detail: {err})"
             )
 
