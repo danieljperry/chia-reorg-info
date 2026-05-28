@@ -357,36 +357,88 @@ def _extract_puzzle_reveals(
         # Surface a compact summary of why every shape failed.
         return {}, "Program.run failed for all shapes: " + " | ".join(errors[:3])
 
-    # The result should be a list of (parent, puzzle_reveal, amount,
-    # solution) tuples. Walk it and build the dict.
+    # Walk the result looking for (parent puzzle_reveal amount solution)
+    # 4-tuples. The chia generator's exact output shape varies across
+    # versions: sometimes a flat list of spend tuples, sometimes wrapped
+    # one level deeper. We try both AND a recursive walker as fallback,
+    # then merge — duplicate puzzle_hash keys just overwrite each other.
     reveals: dict[bytes, bytes] = {}
-    walk_err: str | None = None
-    try:
-        iterator = result.as_iter()
-    except Exception as e:
-        return {}, f"ran via {shape_used} but result.as_iter() failed: {type(e).__name__}: {e}"
+    strategy_counts: list[str] = []
+    last_walk_err: str | None = None
 
-    spend_count = 0
-    for spend_sexp in iterator:
-        spend_count += 1
+    def _try_extract(node: Any) -> bool:
+        nonlocal last_walk_err
         try:
-            puzzle_reveal = spend_sexp.rest().first()
-            reveal_bytes = bytes(puzzle_reveal)
-            ph = bytes(puzzle_reveal.get_tree_hash())
-            reveals[ph] = reveal_bytes
+            puzzle = node.rest().first()
+            ph = bytes(puzzle.get_tree_hash())
+            if len(ph) != 32:
+                return False
+            reveals[ph] = bytes(puzzle)
+            return True
         except Exception as e:
-            walk_err = f"{type(e).__name__}: {e}"
-            continue
+            last_walk_err = f"{type(e).__name__}: {e}"
+            return False
 
+    # Strategy A — flat: iterate result directly as if it's the spend list.
+    a_count = 0
+    a_seen = 0
+    try:
+        for sp in result.as_iter():
+            a_seen += 1
+            if _try_extract(sp):
+                a_count += 1
+        strategy_counts.append(f"flat={a_count}/{a_seen}")
+    except Exception as e:
+        strategy_counts.append(f"flat-err={type(e).__name__}")
+
+    # Strategy B — wrapped: result.first() is the spend list.
+    b_count = 0
+    b_seen = 0
+    try:
+        first = result.first()
+        for sp in first.as_iter():
+            b_seen += 1
+            if _try_extract(sp):
+                b_count += 1
+        strategy_counts.append(f"wrapped={b_count}/{b_seen}")
+    except Exception as e:
+        strategy_counts.append(f"wrapped-err={type(e).__name__}")
+
+    # Strategy C — recursive: walk the whole tree looking for any 4-tuple
+    # whose 2nd element hashes to 32 bytes. Catches odd nesting we
+    # don't anticipate. Bounded depth so a malformed program can't
+    # exhaust the stack.
+    c_count = 0
+
+    def _recurse(node: Any, depth: int) -> None:
+        nonlocal c_count
+        if depth > 16:
+            return
+        try:
+            parts = list(node.as_iter())
+        except Exception:
+            return
+        if len(parts) == 4 and _try_extract(node):
+            c_count += 1
+            return
+        for child in parts:
+            _recurse(child, depth + 1)
+
+    try:
+        _recurse(result, 0)
+        strategy_counts.append(f"recursive={c_count}")
+    except Exception as e:
+        strategy_counts.append(f"recursive-err={type(e).__name__}")
+
+    summary = ", ".join(strategy_counts)
     if not reveals:
-        suffix = f"; last walk error: {walk_err}" if walk_err else ""
+        suffix = f"; last walk error: {last_walk_err}" if last_walk_err else ""
         return (
             {},
-            f"ran via {shape_used} ({spend_count} spend tuples) but no reveals extracted{suffix}",
+            f"ran via {shape_used} but extracted 0 reveals ({summary}){suffix}",
         )
 
-    suffix = f"; some skipped: {walk_err}" if walk_err else ""
-    return reveals, f"extracted {len(reveals)} reveals via {shape_used}{suffix}"
+    return reveals, f"extracted {len(reveals)} reveals via {shape_used} ({summary})"
 
 
 def _load_block(row_bytes: bytes) -> FullBlock:
@@ -702,9 +754,24 @@ def _process_block(
                                 f"({extraction_note or 'extraction skipped'})"
                             )
                         else:
+                            # Show the puzzle_hashes that ARE in the dict so
+                            # we can tell whether the extractor missed this
+                            # spend entirely (key absent) vs. chia_rs and
+                            # chia python disagree on the hash (different key).
+                            keys_sample = ", ".join(
+                                "0x" + k.hex()[:12] + "…"
+                                for k in list(puzzle_reveals_by_ph.keys())[:5]
+                            )
+                            more = (
+                                f" +{len(puzzle_reveals_by_ph) - 5} more"
+                                if len(puzzle_reveals_by_ph) > 5
+                                else ""
+                            )
                             classification_note = (
                                 f"puzzle_reveal not found for puzzle_hash="
-                                f"{ph_hex} (have {len(puzzle_reveals_by_ph)} reveals)"
+                                f"{ph_hex}; extracted {len(puzzle_reveals_by_ph)} "
+                                f"reveals: [{keys_sample}{more}]; "
+                                f"extraction: {extraction_note or 'n/a'}"
                             )
                 if classification_note is not None:
                     m["classification_note"] = classification_note
