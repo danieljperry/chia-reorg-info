@@ -85,21 +85,24 @@
 #                  puzzle hash (a09eb1ea…57719037). Adds a "Bridge Info"
 #                  section at the end of the output. Behavior by quiet
 #                  level (within -b):
-#                    default (no -q): full per-match detail — block height
-#                      + hash, timestamp, matched coin (parent / puzzle
-#                      hash / amount), match reason (puzzle_hash /
+#                    default (no -q, no -qq): full per-match detail — block
+#                      height + hash, timestamp, matched coin (parent /
+#                      puzzle hash / amount), match reason (puzzle_hash /
 #                      create_coin target / create_coin hint), and asset
 #                      type when known.
 #                    -q: one-line summary per match — height, timestamp,
 #                      amount, asset type (when known).
+#                    -qq: full per-match detail (same as default). -qq's
+#                      normal purpose is to suppress everything but the
+#                      one-line reorg count; here the Bridge Info section
+#                      is the only useful output, so we keep it detailed.
 #                  When no matches: "No bridge transfers were found in any
 #                  reorged blocks from this query."
-#                  Incompatible with -qq. Requires chia-blockchain for
-#                  full coin amount / spend details; falls back to byte-
-#                  search detection (no amounts) when chia is unavailable
-#                  or the generator can't be parsed. To extend the search
-#                  set, edit BRIDGE_HASHES at the top of main() in this
-#                  script.
+#                  Requires chia-blockchain for full coin amount / spend
+#                  details; falls back to byte-search detection (no
+#                  amounts) when chia is unavailable or the generator
+#                  can't be parsed. To extend the search set, edit
+#                  BRIDGE_HASHES at the top of main() in this script.
 #   -h             Show this help
 #
 # Environment overrides (CLI flags take precedence):
@@ -304,12 +307,88 @@ if [[ "$AGGREGATE_STATS" == "true" ]]; then
   fi
 fi
 
-# -b/--bridge is incompatible with -qq: the bridge section needs at least
-# a one-line per-match summary and -qq emits only the global one-liner.
-if [[ "$BRIDGE" == "true" && "$QQ_QUIET" == "true" ]]; then
-  echo "Error: -b/--bridge is incompatible with -qq" >&2
-  exit 2
-fi
+# Resolve the chia python interpreter. Done EARLY (before any of the
+# no-cluster / -qq early-exits) because the Bridge Info section can be
+# emitted from those paths and may need to invoke the chia-python
+# helpers. The function and assignment used to live further down, but
+# the -b/-qq combination now reaches early-exits that need it.
+#
+#   1. $CHIA_PYTHON if set (user override)
+#   2. Shebang of `which chia` (chia's CLI is a console_scripts entry
+#      point whose first line points at the venv's python)
+#   3. Fall back to `python3`
+_resolve_chia_python() {
+  if [[ -n "${CHIA_PYTHON:-}" ]]; then
+    printf '%s' "$CHIA_PYTHON"
+    return
+  fi
+  local chia_bin shebang
+  if chia_bin=$(command -v chia 2>/dev/null); then
+    shebang=$(head -n 1 "$chia_bin" 2>/dev/null || true)
+    if [[ "$shebang" =~ ^\#![[:space:]]*(/[^[:space:]]+) ]]; then
+      local interp="${BASH_REMATCH[1]}"
+      if [[ "$interp" == *python* && -x "$interp" ]]; then
+        printf '%s' "$interp"
+        return
+      fi
+    fi
+  fi
+  printf '%s' "python3"
+}
+CHIA_PYTHON_BIN=$(_resolve_chia_python)
+
+# Single source of truth for the Bridge Info section. Called from four
+# sites (two no-cluster early-exits, the -qq early-exit, and end of
+# main). Verbosity rule:
+#   * -qq + -b → detailed (per user spec — -qq's main effect is to
+#     suppress the per-reorg list; the bridge section stays detailed
+#     because it's the only useful output in that combo)
+#   * -q + -b (no -qq) → quiet (one line per match)
+#   * -b (no quiet) → detailed
+_emit_bridge_info_section() {
+  echo
+  echo "Bridge Info:"
+  local _bridge_helper="$(dirname "$SCRIPT_PATH")/_decode_bridge_spends.py"
+  local _bridge_formatter="$(dirname "$SCRIPT_PATH")/_format_bridge_info.py"
+  local _bridge_targets=$(IFS=,; echo "${BRIDGE_HASHES[*]}")
+  local _bridge_quiet="detailed"
+  if [[ "$QUIET" == "true" && "$QQ_QUIET" == "false" ]]; then
+    _bridge_quiet="quiet"
+  fi
+
+  if [[ -z "${HEIGHT_LIST:-}" ]]; then
+    echo "  No bridge transfers were found in any reorged blocks from this query."
+    return
+  fi
+
+  local _orphan_pairs
+  _orphan_pairs=$(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
+    "SELECT height, lower(hex(header_hash)) FROM full_blocks \
+     WHERE height IN ($HEIGHT_LIST) AND in_main_chain = 0;")
+  if [[ -z "$_orphan_pairs" ]]; then
+    echo "  No bridge transfers were found in any reorged blocks from this query."
+    return
+  fi
+
+  local _bridge_stderr
+  _bridge_stderr=$(mktemp)
+  local _bridge_json
+  _bridge_json=$(printf '%s' "$_orphan_pairs" \
+    | "$CHIA_PYTHON_BIN" "$_bridge_helper" "$DB_PATH" "$_bridge_targets" 2>"$_bridge_stderr" || true)
+  if [[ -z "$_bridge_json" ]]; then
+    echo "  No bridge transfers were found in any reorged blocks from this query."
+    echo "  (Note: bridge helper unavailable — could not byte-scan orphan blocks.)"
+    echo "  Tried python: $CHIA_PYTHON_BIN"
+    if [[ -s "$_bridge_stderr" ]]; then
+      echo "  Helper output:"
+      while IFS= read -r _line; do echo "    $_line"; done < "$_bridge_stderr"
+    fi
+  else
+    printf '%s' "$_bridge_json" \
+      | "$CHIA_PYTHON_BIN" "$_bridge_formatter" "$_bridge_quiet"
+  fi
+  rm -f "$_bridge_stderr"
+}
 
 if [[ -z "$END_HEIGHT" ]]; then
   if [[ "$PEAK_FROM" == "db" ]]; then
@@ -394,12 +473,12 @@ if [[ -z "$IN_RANGE_HEIGHTS" ]]; then
   else
     echo "No re-orged heights found in range."
   fi
-  # If -b was set we still owe the user a Bridge Info section — there are
-  # no orphans to search, so the "no transfers" message applies.
-  if [[ "$BRIDGE" == "true" && "$JSON_OUT" == "false" && "$QQ_QUIET" == "false" && "$AGGREGATE_STATS" == "false" ]]; then
-    echo
-    echo "Bridge Info:"
-    echo "  No bridge transfers were found in any reorged blocks from this query."
+  # If -b was set we still owe the user a Bridge Info section. No clusters
+  # means HEIGHT_LIST stays unset and the function short-circuits with the
+  # "no transfers" message. Allowed under -qq now (the section is the only
+  # bridge output the caller would see).
+  if [[ "$BRIDGE" == "true" && "$JSON_OUT" == "false" && "$AGGREGATE_STATS" == "false" ]]; then
+    _emit_bridge_info_section
   fi
   exit 0
 fi
@@ -477,10 +556,9 @@ if [[ ${#KEPT_LOWS[@]} -eq 0 ]]; then
   fi
   # Same as the prior early-exit: if -b was set, emit the Bridge Info
   # section here too — no surviving clusters means no orphans to search.
-  if [[ "$BRIDGE" == "true" && "$JSON_OUT" == "false" && "$QQ_QUIET" == "false" && "$AGGREGATE_STATS" == "false" ]]; then
-    echo
-    echo "Bridge Info:"
-    echo "  No bridge transfers were found in any reorged blocks from this query."
+  # Allowed under -qq now.
+  if [[ "$BRIDGE" == "true" && "$JSON_OUT" == "false" && "$AGGREGATE_STATS" == "false" ]]; then
+    _emit_bridge_info_section
   fi
   exit 0
 fi
@@ -725,9 +803,18 @@ if [[ "$JSON_OUT" == "true" ]]; then
   exit 0
 fi
 
-# Super-quiet: just the one-line summary, no further output of any kind.
+# Super-quiet: just the one-line summary, no further output of any kind
+# — UNLESS -b/--bridge is also set, in which case we still emit the
+# Bridge Info section at full detail. -qq's normal purpose (suppress
+# everything but the count) doesn't fit the bridge use case: the user
+# specifically asked for bridge info, so we honor that. The bridge
+# verbosity selector treats -qq as "detailed" (not "quiet"); -q is
+# the only flag that triggers the one-line-per-match short form.
 if [[ "$QQ_QUIET" == "true" ]]; then
   echo "Found $N_CLUSTERS reorgs of at least $MIN_DEPTH blocks in the specified range."
+  if [[ "$BRIDGE" == "true" ]]; then
+    _emit_bridge_info_section
+  fi
   exit 0
 fi
 
@@ -746,30 +833,10 @@ POS_AVAILABLE="false"
 POS_ERROR=""
 POS_HELPER="$(dirname "$SCRIPT_PATH")/_decode_pos.py"
 
-# Resolve a Python interpreter that can `import chia`. Order:
-#   1. $CHIA_PYTHON if set (user override)
-#   2. Shebang of `which chia` (chia's CLI is a console_scripts entry point
-#      whose first line points at the venv's python).
-#   3. Fall back to `python3` (will fail if chia isn't in the system python).
-_resolve_chia_python() {
-  if [[ -n "${CHIA_PYTHON:-}" ]]; then
-    printf '%s' "$CHIA_PYTHON"
-    return
-  fi
-  local chia_bin shebang
-  if chia_bin=$(command -v chia 2>/dev/null); then
-    shebang=$(head -n 1 "$chia_bin" 2>/dev/null || true)
-    if [[ "$shebang" =~ ^\#![[:space:]]*(/[^[:space:]]+) ]]; then
-      local interp="${BASH_REMATCH[1]}"
-      if [[ "$interp" == *python* && -x "$interp" ]]; then
-        printf '%s' "$interp"
-        return
-      fi
-    fi
-  fi
-  printf '%s' "python3"
-}
-CHIA_PYTHON_BIN=$(_resolve_chia_python)
+# _resolve_chia_python and CHIA_PYTHON_BIN are now resolved earlier in
+# main() — see the block just above where -b/--bridge is validated.
+# They need to be available before the no-cluster / -qq early-exits
+# because the Bridge Info section may be emitted from those paths.
 
 NEED_POS="false"
 [[ "$QUIET" == "false" || "$COMPARE_PROOFS" == "true" || "$AGGREGATE_STATS" == "true" ]] && NEED_POS="true"
@@ -1228,42 +1295,7 @@ fi
 # Python formatter. Always emits at least the "no transfers" line so the
 # section is present whenever -b was requested.
 if [[ "$BRIDGE" == "true" ]]; then
-  echo
-  echo "Bridge Info:"
-  _bridge_helper="$(dirname "$SCRIPT_PATH")/_decode_bridge_spends.py"
-  _bridge_formatter="$(dirname "$SCRIPT_PATH")/_format_bridge_info.py"
-  _bridge_targets=$(IFS=,; echo "${BRIDGE_HASHES[*]}")
-  _bridge_quiet="detailed"
-  [[ "$QUIET" == "true" ]] && _bridge_quiet="quiet"
-
-  if [[ -z "${HEIGHT_LIST:-}" ]]; then
-    # No clusters at all → no orphans → no bridge transfers.
-    echo "  No bridge transfers were found in any reorged blocks from this query."
-  else
-    _orphan_pairs=$(sqlite3 -separator $'\t' "file:${DB_PATH}?mode=ro" \
-      "SELECT height, lower(hex(header_hash)) FROM full_blocks \
-       WHERE height IN ($HEIGHT_LIST) AND in_main_chain = 0;")
-    if [[ -z "$_orphan_pairs" ]]; then
-      echo "  No bridge transfers were found in any reorged blocks from this query."
-    else
-      _bridge_stderr=$(mktemp)
-      _bridge_json=$(printf '%s' "$_orphan_pairs" \
-        | "$CHIA_PYTHON_BIN" "$_bridge_helper" "$DB_PATH" "$_bridge_targets" 2>"$_bridge_stderr" || true)
-      if [[ -z "$_bridge_json" ]]; then
-        echo "  No bridge transfers were found in any reorged blocks from this query."
-        echo "  (Note: bridge helper unavailable — could not byte-scan orphan blocks.)"
-        echo "  Tried python: $CHIA_PYTHON_BIN"
-        if [[ -s "$_bridge_stderr" ]]; then
-          echo "  Helper output:"
-          while IFS= read -r _line; do echo "    $_line"; done < "$_bridge_stderr"
-        fi
-      else
-        printf '%s' "$_bridge_json" \
-          | "$CHIA_PYTHON_BIN" "$_bridge_formatter" "$_bridge_quiet"
-      fi
-      rm -f "$_bridge_stderr"
-    fi
-  fi
+  _emit_bridge_info_section
 fi
 }
 
