@@ -260,4 +260,92 @@ describe('reorg-finder.sh end-to-end (synthetic DB)', () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toMatch(/--aggregate-stats is incompatible with --json/);
   });
+
+  // ---- -b/--bridge flag tests ----
+  // These verify flag parsing, validation, and that Bridge Info shows up
+  // in the right places. The actual byte-search / spend-extraction
+  // behavior is tested separately in bridge-formatter.test.ts. Here we
+  // can't drive the helper end-to-end because the synthetic test DB
+  // doesn't have chia FullBlock blobs — the helper would fall through
+  // to its "couldn't decompress" path, which is fine for these tests.
+
+  it('-b + -qq is rejected with the exact error message', () => {
+    const r = run(['-b', '-qq']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/-b\/--bridge is incompatible with -qq/);
+  });
+
+  it('--bridge + -qq is rejected (long form too)', () => {
+    const r = run(['--bridge', '-qq']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/-b\/--bridge is incompatible with -qq/);
+  });
+
+  it('-b on a clean DB (no reorgs) emits the "no transfers" line', () => {
+    const db = buildDb(
+      dir,
+      Array.from({ length: 5 }, (_, i) => ({
+        height: 100 + i,
+        header_hash: `a${i}`.padEnd(64, '0'),
+        in_main_chain: 1 as const,
+      }))
+    );
+    const r = run(['-d', db, '-e', '104', '-n', '5', '--peak-from', 'db', '-b']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('Bridge Info:');
+    expect(r.stdout).toContain(
+      'No bridge transfers were found in any reorged blocks from this query.'
+    );
+  });
+
+  it('-b on a DB with reorgs emits the Bridge Info section after the per-block detail', () => {
+    // One reorg at 102. The helper will try to decode the orphan block;
+    // since the synthetic DB has no real FullBlock blob, decode fails and
+    // every orphan returns no match — "no transfers" is the expected line.
+    const db = buildDb(dir, [
+      { height: 100, header_hash: 'a0'.padEnd(64, '0'), in_main_chain: 1 },
+      { height: 101, header_hash: 'a1'.padEnd(64, '0'), in_main_chain: 1 },
+      { height: 102, header_hash: 'a2'.padEnd(64, '0'), in_main_chain: 1 },
+      { height: 102, header_hash: 'b2'.padEnd(64, '0'), in_main_chain: 0 },
+      { height: 103, header_hash: 'a3'.padEnd(64, '0'), in_main_chain: 1 },
+      { height: 104, header_hash: 'a4'.padEnd(64, '0'), in_main_chain: 1 },
+    ]);
+    const r = run(['-d', db, '-e', '104', '-n', '5', '--peak-from', 'db', '-b']);
+    expect(r.status).toBe(0);
+    // The reorg summary is still emitted.
+    expect(r.stdout).toContain('Found a reorg of 1 block(s) (heights 102..102)');
+    // Bridge Info section is present at the end.
+    expect(r.stdout).toContain('Bridge Info:');
+    // Ordering: Bridge Info comes AFTER the reorg summary.
+    expect(r.stdout.indexOf('Bridge Info:')).toBeGreaterThan(
+      r.stdout.indexOf('Found a reorg of')
+    );
+  });
+
+  it('-b with --json does NOT inject prose into the JSON (JSON stays valid)', () => {
+    const db = buildDb(
+      dir,
+      Array.from({ length: 5 }, (_, i) => ({
+        height: 100 + i,
+        header_hash: `a${i}`.padEnd(64, '0'),
+        in_main_chain: 1 as const,
+      }))
+    );
+    const r = run(['-d', db, '-e', '104', '-n', '5', '--peak-from', 'db', '-b', '--json']);
+    expect(r.status).toBe(0);
+    // stdout should be exactly one JSON object — Bridge Info is suppressed
+    // under --json since the output is meant to be parsed.
+    expect(() => {
+      JSON.parse(r.stdout);
+    }).not.toThrow();
+    expect(r.stdout).not.toContain('Bridge Info');
+  });
+
+  it('help text mentions -b/--bridge', () => {
+    const r = run(['-h']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/-b, --bridge/);
+    expect(r.stdout).toMatch(/Warp\.green/);
+    expect(r.stdout).toMatch(/a09eb1ea/);
+  });
 });
