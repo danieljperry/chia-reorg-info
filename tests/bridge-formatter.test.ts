@@ -244,6 +244,62 @@ describe('_format_bridge_info.py', () => {
     expect(r.stdout).not.toMatch(/asset_id/);
   });
 
+  it('detailed: spend with classification_note prints a "note:" line under asset', () => {
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'unknown',
+              asset_id: null,
+              classification_note: 'uncurried mod_hash=abc123…; no template match (loaded: p2,cat,singleton)',
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/note: {8}uncurried mod_hash=abc123…/);
+    expect(r.stdout).toMatch(/no template match \(loaded: p2,cat,singleton\)/);
+  });
+
+  it('detailed: spend without classification_note skips the note line', () => {
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'xch',
+              asset_id: null,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/note:/);
+  });
+
   it('detailed: byte-search-only match reports "Spend details: unavailable" with the error', () => {
     const payload = {
       matches: [

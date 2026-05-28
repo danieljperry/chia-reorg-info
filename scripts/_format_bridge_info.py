@@ -115,6 +115,9 @@ def _emit_detailed(matches):
                 print(f"          asset:       {asset_type} (asset_id: {asset_id})")
             else:
                 print(f"          asset:       {asset_type}")
+            note = s.get("classification_note")
+            if note:
+                print(f"          note:        {note}")
             reasons = s.get("match_reasons") or []
             matched_h = s.get("matched_hashes") or []
             print(f"          matched on:  {', '.join(reasons) or '(unknown)'}")

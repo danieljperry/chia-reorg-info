@@ -182,50 +182,56 @@ _SINGLETON_MOD_HASH = (
 
 def _classify_puzzle(
     puzzle_reveal_bytes: bytes, target_hashes: list[bytes]
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str]:
     """Identify a puzzle's asset type by uncurrying it and matching the
     inner MOD's tree hash against the well-known templates.
 
-    Returns (asset_type, asset_id_or_None):
+    Returns (asset_type, asset_id_or_None, note):
       - "bridge", None — coin's full puzzle hash matches a configured target
       - "xch", None    — standard p2_delegated puzzle (plain XCH)
       - "cat", "0x<tail_hash>" — CAT outer puzzle; asset_id is the TAIL hash
       - "singleton", "0x<launcher_id>" — singleton outer; asset_id is launcher
       - "unknown", None — uncurry failed or no known template matched
 
+    The third return value is a short human-readable diagnostic note
+    explaining how the decision was reached — used to surface 'unknown'
+    causes inline in the Bridge Info output without an extra debug flag.
+
     Robust against missing chia modules and uncurry errors: any failure
-    yields ("unknown", None) instead of throwing."""
+    yields ("unknown", None, "...") instead of throwing."""
     if _PROGRAM_CLS is None:
-        return "unknown", None
+        return "unknown", None, "chia python (Program) not importable"
     try:
         prog = _PROGRAM_CLS.from_bytes(puzzle_reveal_bytes)
-    except Exception:
-        return "unknown", None
+    except Exception as e:
+        return "unknown", None, f"Program.from_bytes failed: {type(e).__name__}: {e}"
 
     # Whole-puzzle hash match → this IS the bridge message coin.
     try:
         ph = bytes(prog.get_tree_hash())
         if ph in target_hashes:
-            return "bridge", None
+            return "bridge", None, "whole puzzle hash matches a configured target"
     except Exception:
         pass
 
     # Try to uncurry to identify the wrapper.
     try:
         mod, curried_args = prog.uncurry()
-    except Exception:
-        return "unknown", None
+    except Exception as e:
+        return "unknown", None, f"uncurry threw: {type(e).__name__}: {e}"
     if mod is None:
-        return "unknown", None
+        return "unknown", None, "uncurry returned no mod (not a curried puzzle)"
     try:
         mod_hash = bytes(mod.get_tree_hash())
-    except Exception:
-        return "unknown", None
+    except Exception as e:
+        return "unknown", None, f"mod.get_tree_hash failed: {type(e).__name__}: {e}"
+
+    mod_short = mod_hash.hex()[:12] + "…"
 
     if _STANDARD_MOD_HASH is not None and mod_hash == _STANDARD_MOD_HASH:
         # Standard XCH puzzle. Single curried arg is the synthetic public
         # key; no asset_id to extract.
-        return "xch", None
+        return "xch", None, f"mod_hash={mod_short} matches p2_delegated → xch"
 
     if _CAT_MOD_HASH is not None and mod_hash == _CAT_MOD_HASH:
         # CAT outer puzzle. Curried args: (CAT_MOD_HASH, TAIL_HASH, inner).
@@ -235,10 +241,14 @@ def _classify_puzzle(
             if len(args_list) >= 2:
                 tail = bytes(args_list[1].as_atom() or b"")
                 if len(tail) == 32:
-                    return "cat", "0x" + tail.hex()
+                    return (
+                        "cat",
+                        "0x" + tail.hex(),
+                        f"mod_hash={mod_short} matches CAT_MOD → cat",
+                    )
         except Exception:
             pass
-        return "cat", None
+        return "cat", None, f"mod_hash={mod_short} matches CAT_MOD but TAIL extract failed"
 
     if _SINGLETON_MOD_HASH is not None and mod_hash == _SINGLETON_MOD_HASH:
         # Singleton outer puzzle. First curried arg is the singleton_struct:
@@ -251,81 +261,132 @@ def _classify_puzzle(
                     singleton_struct.rest().first().as_atom() or b""
                 )
                 if len(launcher_id) == 32:
-                    return "singleton", "0x" + launcher_id.hex()
+                    return (
+                        "singleton",
+                        "0x" + launcher_id.hex(),
+                        f"mod_hash={mod_short} matches SINGLETON_MOD → singleton",
+                    )
         except Exception:
             pass
-        return "singleton", None
+        return (
+            "singleton",
+            None,
+            f"mod_hash={mod_short} matches SINGLETON_MOD but launcher_id extract failed",
+        )
 
-    return "unknown", None
+    # No template matched — report what we found so we can extend the
+    # classifier for new templates in the future.
+    loaded = []
+    if _STANDARD_MOD_HASH is not None:
+        loaded.append("p2")
+    if _CAT_MOD_HASH is not None:
+        loaded.append("cat")
+    if _SINGLETON_MOD_HASH is not None:
+        loaded.append("singleton")
+    loaded_str = ",".join(loaded) if loaded else "none"
+    return (
+        "unknown",
+        None,
+        f"uncurried mod_hash={mod_short}; no template match (loaded: {loaded_str})",
+    )
 
 
 def _extract_puzzle_reveals(
     block: FullBlock, db: sqlite3.Connection
-) -> dict[bytes, bytes]:
-    """Run the block's generator via chia python's Program.run() to get
-    the raw spend tuples, returning a dict from puzzle_hash → puzzle_reveal
-    bytes for every spend in the block.
+) -> tuple[dict[bytes, bytes], str]:
+    """Run the block's generator via chia python to get the raw spend
+    tuples, returning (puzzle_hash → puzzle_reveal_bytes, diagnostic_note).
 
-    This is a parallel pass to chia_rs.run_block_generator: chia_rs gives
-    us amount + parent + parsed conditions but NOT the puzzle_reveal
-    bytes (which we need for asset classification). We could replace the
-    chia_rs call entirely, but keeping both is safer — Program.run() may
-    fail on some blocks where chia_rs succeeds (or vice versa).
-
-    Returns {} on any failure; the caller treats missing reveals as
-    'asset unknown' rather than erroring out."""
-    if _PROGRAM_CLS is None or block.transactions_generator is None:
-        return {}
+    Tries several Program.run shapes because chia's API differs across
+    versions (some take args directly, some require run_with_cost with
+    a max_cost). On total failure, returns ({}, note explaining why).
+    On partial success, returns whatever reveals could be extracted plus
+    a note. On full success: (reveals, "extracted N reveals via <shape>")."""
+    if _PROGRAM_CLS is None:
+        return {}, "chia python (Program) not importable"
+    if block.transactions_generator is None:
+        return {}, "block has no transactions_generator"
 
     refs: list[Any] = []
     for ref_h in block.transactions_generator_ref_list:
         ref_block = _get_canonical_block(db, int(ref_h))
         if ref_block is None or ref_block.transactions_generator is None:
-            return {}
+            return {}, f"ref block at height {int(ref_h)} unavailable"
         try:
             refs.append(_PROGRAM_CLS.from_bytes(bytes(ref_block.transactions_generator)))
-        except Exception:
-            return {}
+        except Exception as e:
+            return {}, f"ref block at {int(ref_h)} Program.from_bytes failed: {type(e).__name__}: {e}"
 
     try:
         gen_prog = _PROGRAM_CLS.from_bytes(bytes(block.transactions_generator))
-    except Exception:
-        return {}
+    except Exception as e:
+        return {}, f"generator Program.from_bytes failed: {type(e).__name__}: {e}"
 
-    # The generator expects the refs wrapped in a single positional list.
-    # The chia BlockGenerator code passes Program.to([refs]) — i.e. a
-    # 1-element list whose element is the refs list. We try that first
-    # and fall back to passing refs directly if it doesn't work.
-    result = None
-    for args_builder in (
-        lambda: _PROGRAM_CLS.to([refs]),
-        lambda: _PROGRAM_CLS.to(refs),
+    max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
+
+    # Try every combination of (args shape, run method) — chia's Program
+    # API has shifted across versions: Program.run vs run_with_cost,
+    # args wrapped in outer list vs not, etc. First success wins.
+    attempts: list[tuple[str, Any]] = []
+    for args_label, args_factory in (
+        ("[[refs]]", lambda: _PROGRAM_CLS.to([refs])),
+        ("[refs]", lambda: _PROGRAM_CLS.to(refs)),
     ):
+        for run_label, runner in (
+            ("run", lambda p, a: p.run(a)),
+            (
+                "run_with_cost",
+                lambda p, a: p.run_with_cost(max_cost, a)[1],
+            ),
+        ):
+            attempts.append((f"{run_label}({args_label})", (args_factory, runner)))
+
+    result = None
+    shape_used = ""
+    errors: list[str] = []
+    for label, (args_factory, runner) in attempts:
         try:
-            args = args_builder()
-            result = gen_prog.run(args)
+            args = args_factory()
+            result = runner(gen_prog, args)
+            shape_used = label
             break
-        except Exception:
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}: {e}")
             continue
     if result is None:
-        return {}
+        # Surface a compact summary of why every shape failed.
+        return {}, "Program.run failed for all shapes: " + " | ".join(errors[:3])
 
-    # The result is a list of (parent, puzzle_reveal, amount, solution)
-    # tuples. Walk it and build the dict.
+    # The result should be a list of (parent, puzzle_reveal, amount,
+    # solution) tuples. Walk it and build the dict.
     reveals: dict[bytes, bytes] = {}
+    walk_err: str | None = None
     try:
-        for spend_sexp in result.as_iter():
-            try:
-                # spend_sexp is a 4-tuple. Second element is the puzzle reveal.
-                puzzle_reveal = spend_sexp.rest().first()
-                reveal_bytes = bytes(puzzle_reveal)
-                ph = bytes(puzzle_reveal.get_tree_hash())
-                reveals[ph] = reveal_bytes
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return reveals
+        iterator = result.as_iter()
+    except Exception as e:
+        return {}, f"ran via {shape_used} but result.as_iter() failed: {type(e).__name__}: {e}"
+
+    spend_count = 0
+    for spend_sexp in iterator:
+        spend_count += 1
+        try:
+            puzzle_reveal = spend_sexp.rest().first()
+            reveal_bytes = bytes(puzzle_reveal)
+            ph = bytes(puzzle_reveal.get_tree_hash())
+            reveals[ph] = reveal_bytes
+        except Exception as e:
+            walk_err = f"{type(e).__name__}: {e}"
+            continue
+
+    if not reveals:
+        suffix = f"; last walk error: {walk_err}" if walk_err else ""
+        return (
+            {},
+            f"ran via {shape_used} ({spend_count} spend tuples) but no reveals extracted{suffix}",
+        )
+
+    suffix = f"; some skipped: {walk_err}" if walk_err else ""
+    return reveals, f"extracted {len(reveals)} reveals via {shape_used}{suffix}"
 
 
 def _load_block(row_bytes: bytes) -> FullBlock:
@@ -581,23 +642,23 @@ def _process_block(
     spends_list, gen_err = _try_run_generator(block, db)
     spend_details: list[dict] = []
     # Lazy: only pay for the Program.run() pass if we actually matched
-    # something AND have chia python available. Re-running the generator
-    # is the most expensive op in this whole helper.
+    # something. We capture the extraction note (success or failure
+    # reason) and stamp it on the block-level output so failures show up
+    # in Bridge Info without an extra debug flag.
     puzzle_reveals_by_ph: dict[bytes, bytes] = {}
+    extraction_note: str | None = None
     _reveals_loaded = False
 
     def _ensure_reveals_loaded() -> None:
-        nonlocal puzzle_reveals_by_ph, _reveals_loaded
+        nonlocal puzzle_reveals_by_ph, _reveals_loaded, extraction_note
         if _reveals_loaded:
             return
         _reveals_loaded = True
         try:
-            puzzle_reveals_by_ph = _extract_puzzle_reveals(block, db)
+            puzzle_reveals_by_ph, extraction_note = _extract_puzzle_reveals(block, db)
         except Exception as e:
-            print(
-                f"# puzzle-reveal extraction failed at {height}:{hh_hex}: "
-                f"{type(e).__name__}: {e}",
-                file=sys.stderr,
+            extraction_note = (
+                f"_extract_puzzle_reveals threw: {type(e).__name__}: {e}"
             )
 
     if spends_list is not None:
@@ -614,22 +675,39 @@ def _process_block(
                 # is the SOURCE (e.g. XCH wallet, CAT) creating the
                 # bridge message coin, and we want to identify that.
                 _ensure_reveals_loaded()
-                ph_hex = (m.get("coin") or {}).get("puzzle_hash")
-                if ph_hex and isinstance(ph_hex, str):
-                    ph_clean = ph_hex[2:] if ph_hex.startswith("0x") else ph_hex
-                    try:
-                        ph_bytes = bytes.fromhex(ph_clean)
-                    except ValueError:
-                        ph_bytes = b""
-                    reveal = puzzle_reveals_by_ph.get(ph_bytes)
+                classification_note: str | None = None
+                if m.get("asset_type") == "bridge":
+                    classification_note = "whole puzzle_hash matches a configured target"
+                else:
+                    ph_hex = (m.get("coin") or {}).get("puzzle_hash")
+                    ph_bytes = b""
+                    if ph_hex and isinstance(ph_hex, str):
+                        ph_clean = ph_hex[2:] if ph_hex.startswith("0x") else ph_hex
+                        try:
+                            ph_bytes = bytes.fromhex(ph_clean)
+                        except ValueError:
+                            ph_bytes = b""
+                    reveal = puzzle_reveals_by_ph.get(ph_bytes) if ph_bytes else None
                     if reveal is not None:
-                        new_type, new_id = _classify_puzzle(reveal, target_hashes)
-                        # Don't downgrade a bridge classification. If the
-                        # spent coin's whole puzzle_hash equals a target,
-                        # _match_spend already marked it bridge — keep that.
-                        if m.get("asset_type") != "bridge":
-                            m["asset_type"] = new_type
-                            m["asset_id"] = new_id
+                        new_type, new_id, note = _classify_puzzle(
+                            reveal, target_hashes
+                        )
+                        m["asset_type"] = new_type
+                        m["asset_id"] = new_id
+                        classification_note = note
+                    else:
+                        if not puzzle_reveals_by_ph:
+                            classification_note = (
+                                "no puzzle reveals available "
+                                f"({extraction_note or 'extraction skipped'})"
+                            )
+                        else:
+                            classification_note = (
+                                f"puzzle_reveal not found for puzzle_hash="
+                                f"{ph_hex} (have {len(puzzle_reveals_by_ph)} reveals)"
+                            )
+                if classification_note is not None:
+                    m["classification_note"] = classification_note
                 spend_details.append(m)
             except Exception as e:
                 # Don't let one mis-shaped spend kill the whole match.
@@ -645,6 +723,7 @@ def _process_block(
         "byte_matched_hashes": byte_matched,
         "generator_parsed": spends_list is not None,
         "generator_error": gen_err,
+        "classification_extraction_note": extraction_note,
         "spends": spend_details,
     }
 
