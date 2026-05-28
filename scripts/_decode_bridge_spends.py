@@ -92,13 +92,29 @@ except ImportError as e1:
         sys.exit(3)
 
 # Generator runner — optional. When unavailable, we fall back to
-# byte-search-only output. Tried multiple import paths because the API
-# location has moved between chia versions.
-_run_generator = None
+# byte-search-only output. The chia_rs API has churned across versions,
+# so we import both run_block_generator (no BLS check) and
+# run_block_generator2 (with BLS check) when available, and try both at
+# call time with the right argument shapes.
+_run_generator_v1 = None
+_run_generator_v2 = None
 _DEFAULT_CONSTANTS: Any = None
+_ZERO_G2: Any = None
 _generator_setup_error: str | None = None
+
 try:
-    from chia_rs import run_block_generator2 as _run_generator
+    from chia_rs import run_block_generator2 as _run_generator_v2  # type: ignore
+except ImportError as e:
+    _generator_setup_error = f"chia_rs.run_block_generator2 not importable: {e}"
+
+try:
+    from chia_rs import run_block_generator as _run_generator_v1  # type: ignore
+except ImportError:
+    pass
+
+if _run_generator_v1 is None and _run_generator_v2 is None:
+    pass  # _generator_setup_error already set above
+else:
     try:
         from chia.consensus.default_constants import DEFAULT_CONSTANTS as _DEFAULT_CONSTANTS  # type: ignore
     except ImportError:
@@ -106,9 +122,24 @@ try:
             from chia_rs import DEFAULT_CONSTANTS as _DEFAULT_CONSTANTS  # type: ignore
         except ImportError as e:
             _generator_setup_error = f"DEFAULT_CONSTANTS not importable: {e}"
-            _run_generator = None
-except ImportError as e:
-    _generator_setup_error = f"chia_rs.run_block_generator2 not importable: {e}"
+    # The v2 signature requires a G2Element signature (and won't accept
+    # None or raw bytes on many chia_rs versions). Construct a zero
+    # (infinity) element — sufficient for our use since we don't care
+    # about BLS aggregation correctness, only about extracting spends.
+    try:
+        from chia_rs import G2Element  # type: ignore
+
+        try:
+            _ZERO_G2 = G2Element()
+        except Exception:
+            # Fall back to constructing from the canonical G2-infinity
+            # bytes (0xc0 + 95 zero bytes = compressed infinity point).
+            try:
+                _ZERO_G2 = G2Element.from_bytes(b"\xc0" + b"\x00" * 95)
+            except Exception:
+                _ZERO_G2 = None
+    except ImportError:
+        _ZERO_G2 = None
 
 
 def _load_block(row_bytes: bytes) -> FullBlock:
@@ -147,9 +178,15 @@ def _byte_search_block(block: FullBlock, target_hashes: list[bytes]) -> list[str
 
 def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
     """Run the block's transactions_generator, returning the spends or None
-    on any failure. The fallback path uses byte search only."""
-    if _run_generator is None or _DEFAULT_CONSTANTS is None:
-        return None, _generator_setup_error
+    on any failure. The fallback path uses byte search only.
+
+    Tries several known chia_rs call shapes in order; reports each attempt's
+    failure if all of them error out. The signatures differ across chia_rs
+    versions — we don't pin a version, so we probe."""
+    if _run_generator_v2 is None and _run_generator_v1 is None:
+        return None, _generator_setup_error or "no generator runner importable"
+    if _DEFAULT_CONSTANTS is None:
+        return None, _generator_setup_error or "DEFAULT_CONSTANTS missing"
     if block.transactions_generator is None:
         return None, "no transactions_generator (non-tx block)"
 
@@ -160,17 +197,50 @@ def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
             return None, f"ref block at height {ref_h} not available"
         refs.append(bytes(ref_block.transactions_generator))
 
-    try:
-        gen_bytes = bytes(block.transactions_generator)
-        max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
-        # API signature varies by version; try a couple shapes.
+    gen_bytes = bytes(block.transactions_generator)
+    max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
+
+    # Each attempt is a (label, callable) — labels surface in error messages
+    # so a TypeError on a specific signature can be diagnosed by reading the
+    # report. Order: most-modern v2 shape first, then fallbacks.
+    attempts: list[tuple[str, Any]] = []
+
+    if _run_generator_v2 is not None:
+        # Modern v2: (program, args, max_cost, flags, signature, bls_cache, constants)
+        sig_g2 = _ZERO_G2 if _ZERO_G2 is not None else bytes(96)
+        attempts.append((
+            "v2/7-arg with G2Element signature",
+            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, sig_g2, None, _DEFAULT_CONSTANTS),
+        ))
+        # Older v2: same shape but signature passed as raw 96-byte bytes.
+        attempts.append((
+            "v2/7-arg with bytes signature",
+            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, bytes(96), None, _DEFAULT_CONSTANTS),
+        ))
+
+    if _run_generator_v1 is not None:
+        # v1 doesn't do BLS checks; signature is (program, args, max_cost, flags, constants).
+        attempts.append((
+            "v1/5-arg",
+            lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0, _DEFAULT_CONSTANTS),
+        ))
+        # Some older versions omit constants too.
+        attempts.append((
+            "v1/4-arg",
+            lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0),
+        ))
+
+    failures: list[str] = []
+    for label, fn in attempts:
         try:
-            result = _run_generator(gen_bytes, refs, max_cost, 0, None, None, _DEFAULT_CONSTANTS)
-        except TypeError:
-            try:
-                result = _run_generator(gen_bytes, refs, max_cost, 0, _DEFAULT_CONSTANTS)
-            except TypeError:
-                result = _run_generator(gen_bytes, refs, max_cost, 0)
+            result = fn()
+        except TypeError as e:
+            failures.append(f"{label}: TypeError: {e}")
+            continue
+        except Exception as e:
+            # Non-TypeError exceptions are real (program crashed, bad args,
+            # etc.) — don't keep trying other signatures.
+            return None, f"{label}: {type(e).__name__}: {e}"
 
         # Result shape: (err, conds) or (cost, conds) depending on version.
         if isinstance(result, tuple) and len(result) >= 2:
@@ -179,10 +249,10 @@ def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
             conds = result
 
         if conds is None:
-            return None, "generator returned None conds"
+            return None, f"{label}: generator returned None conds"
         return list(getattr(conds, "spends", []) or []), None
-    except Exception as e:
-        return None, f"generator run failed: {type(e).__name__}: {e}"
+
+    return None, "no generator signature matched; tried: " + " | ".join(failures)
 
 
 def _match_spend(spend, target_hashes: list[bytes]) -> dict | None:
