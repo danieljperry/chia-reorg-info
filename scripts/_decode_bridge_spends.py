@@ -200,34 +200,37 @@ def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
     gen_bytes = bytes(block.transactions_generator)
     max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
 
-    # Each attempt is a (label, callable) — labels surface in error messages
-    # so a TypeError on a specific signature can be diagnosed by reading the
-    # report. Order: most-modern v2 shape first, then fallbacks.
+    # Each attempt is a (label, callable). Order matters:
+    #
+    #   1. v1 first when available — `run_block_generator` doesn't do BLS
+    #      signature validation, so it succeeds on any block whose CLVM
+    #      runs cleanly. This is what we want: we're extracting spends,
+    #      not validating consensus.
+    #   2. v2 second — fall back if v1 isn't in this chia_rs version.
+    #      v2 requires a real signature; we pass a zero G2Element which
+    #      will fail BLS validation for blocks that actually have AGG_SIG
+    #      conditions, returning (err_code, None) instead of conds.
     attempts: list[tuple[str, Any]] = []
 
-    if _run_generator_v2 is not None:
-        # Modern v2: (program, args, max_cost, flags, signature, bls_cache, constants)
-        sig_g2 = _ZERO_G2 if _ZERO_G2 is not None else bytes(96)
-        attempts.append((
-            "v2/7-arg with G2Element signature",
-            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, sig_g2, None, _DEFAULT_CONSTANTS),
-        ))
-        # Older v2: same shape but signature passed as raw 96-byte bytes.
-        attempts.append((
-            "v2/7-arg with bytes signature",
-            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, bytes(96), None, _DEFAULT_CONSTANTS),
-        ))
-
     if _run_generator_v1 is not None:
-        # v1 doesn't do BLS checks; signature is (program, args, max_cost, flags, constants).
         attempts.append((
-            "v1/5-arg",
+            "v1/5-arg (no BLS check)",
             lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0, _DEFAULT_CONSTANTS),
         ))
-        # Some older versions omit constants too.
         attempts.append((
-            "v1/4-arg",
+            "v1/4-arg (no BLS check)",
             lambda: _run_generator_v1(gen_bytes, refs, max_cost, 0),
+        ))
+
+    if _run_generator_v2 is not None:
+        sig_g2 = _ZERO_G2 if _ZERO_G2 is not None else bytes(96)
+        attempts.append((
+            "v2/7-arg with G2Element signature (BLS check, zero sig)",
+            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, sig_g2, None, _DEFAULT_CONSTANTS),
+        ))
+        attempts.append((
+            "v2/7-arg with bytes signature (BLS check, zero sig)",
+            lambda: _run_generator_v2(gen_bytes, refs, max_cost, 0, bytes(96), None, _DEFAULT_CONSTANTS),
         ))
 
     failures: list[str] = []
@@ -242,17 +245,27 @@ def _try_run_generator(block: FullBlock, db: sqlite3.Connection):
             # etc.) — don't keep trying other signatures.
             return None, f"{label}: {type(e).__name__}: {e}"
 
-        # Result shape: (err, conds) or (cost, conds) depending on version.
+        # chia_rs result shape: (err, conds). When err is non-None, the
+        # generator failed validation; conds is None in that case. When
+        # err is None, conds carries the SpendBundleConditions.
+        err_code = None
+        conds = None
         if isinstance(result, tuple) and len(result) >= 2:
+            err_code = result[0]
             conds = result[1]
         else:
             conds = result
 
         if conds is None:
-            return None, f"{label}: generator returned None conds"
+            # If we used v2 and hit an error, the cause is most likely the
+            # zero signature failing BLS validation. Record and try the
+            # next attempt — v1 would have already succeeded if available,
+            # so this only matters when v1 is unavailable on this version.
+            failures.append(f"{label}: returned (err={err_code!r}, conds=None)")
+            continue
         return list(getattr(conds, "spends", []) or []), None
 
-    return None, "no generator signature matched; tried: " + " | ".join(failures)
+    return None, "no generator signature succeeded; tried: " + " | ".join(failures)
 
 
 def _match_spend(spend, target_hashes: list[bytes]) -> dict | None:
