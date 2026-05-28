@@ -178,6 +178,53 @@ _SINGLETON_MOD_HASH = (
     or _safe_mod_hash("chia.wallet.puzzles.singleton_top_layer_v1_1", "SINGLETON_MOD")
     or _safe_mod_hash("chia.wallet.singleton_top_layer", "SINGLETON_MOD")
 )
+# Additional common chia puzzle templates. Order matters: probed in the
+# order written and the first match wins. Each entry is (asset_label,
+# mod_hash_bytes_or_None) — a None entry just disables that branch.
+# These cover most wallet-related puzzles users will see in practice,
+# so a coin showing up as "unknown_curried" is likely a custom or
+# protocol-specific puzzle (e.g. a warp.green bridge inner contract).
+_EXTRA_TEMPLATES: list[tuple[str, bytes | None]] = [
+    (
+        "p2_singleton",
+        _safe_mod_hash("chia.wallet.puzzles.p2_singleton", "MOD"),
+    ),
+    (
+        "p2_singleton_or_delayed",
+        _safe_mod_hash(
+            "chia.wallet.puzzles.p2_singleton_or_delayed_puzhash", "MOD"
+        ),
+    ),
+    (
+        "nft_state_layer",
+        _safe_mod_hash("chia.wallet.nft_wallet.nft_puzzles", "NFT_STATE_LAYER_MOD")
+        or _safe_mod_hash("chia.wallet.puzzles.nft_state_layer", "MOD"),
+    ),
+    (
+        "nft_ownership_layer",
+        _safe_mod_hash(
+            "chia.wallet.nft_wallet.nft_puzzles", "NFT_OWNERSHIP_LAYER_MOD"
+        )
+        or _safe_mod_hash("chia.wallet.puzzles.nft_ownership_layer", "MOD"),
+    ),
+    (
+        "did_inner",
+        _safe_mod_hash("chia.wallet.did_wallet.did_wallet_puzzles", "DID_INNERPUZ_MOD")
+        or _safe_mod_hash("chia.wallet.puzzles.did_innerpuz", "MOD"),
+    ),
+    (
+        "settlement_payments",
+        _safe_mod_hash(
+            "chia.wallet.puzzles.settlement_payments",
+            "SETTLEMENT_PAYMENTS_MOD",
+        )
+        or _safe_mod_hash("chia.wallet.puzzles.settlement_payments", "MOD"),
+    ),
+    (
+        "cat_v1_legacy",
+        _safe_mod_hash("chia.wallet.puzzles.cc_loader", "CC_MOD"),
+    ),
+]
 
 
 def _classify_puzzle(
@@ -274,20 +321,33 @@ def _classify_puzzle(
             f"mod_hash={mod_short} matches SINGLETON_MOD but launcher_id extract failed",
         )
 
-    # No template matched — report what we found so we can extend the
-    # classifier for new templates in the future.
-    loaded = []
-    if _STANDARD_MOD_HASH is not None:
-        loaded.append("p2")
-    if _CAT_MOD_HASH is not None:
-        loaded.append("cat")
-    if _SINGLETON_MOD_HASH is not None:
-        loaded.append("singleton")
+    # Probe the extra templates. They don't have a distinguished asset_id
+    # to extract (most are inner puzzles wrapped by something else), so
+    # we just label them by name.
+    for label, extra_hash in _EXTRA_TEMPLATES:
+        if extra_hash is not None and mod_hash == extra_hash:
+            return label, None, f"mod_hash={mod_short} matches {label}"
+
+    # No template matched. Surface the FULL mod_hash so the user can
+    # identify it externally (lookup against known protocols, ask the
+    # wallet that produced the coin, etc.) and consider adding it to
+    # _EXTRA_TEMPLATES. asset_id carries the mod_hash so it shows up in
+    # the formatter under "asset_id: 0x..." rather than getting hidden
+    # in the note.
+    builtin_templates = [
+        ("p2", _STANDARD_MOD_HASH),
+        ("cat", _CAT_MOD_HASH),
+        ("singleton", _SINGLETON_MOD_HASH),
+    ]
+    loaded = [
+        lab for lab, h in (builtin_templates + _EXTRA_TEMPLATES) if h is not None
+    ]
     loaded_str = ",".join(loaded) if loaded else "none"
+    full_hex = "0x" + mod_hash.hex()
     return (
-        "unknown",
-        None,
-        f"uncurried mod_hash={mod_short}; no template match (loaded: {loaded_str})",
+        "unknown_curried",
+        full_hex,
+        f"uncurried mod_hash={full_hex}; no template match (loaded: {loaded_str})",
     )
 
 
