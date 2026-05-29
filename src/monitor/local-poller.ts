@@ -28,6 +28,14 @@ export type LocalReorg = {
    *  JSON omits the field (older script), the chia python helper failed,
    *  or the row went missing mid-scan. */
   old_block_record: Record<string, unknown> | null;
+  /** Diagnostic string explaining why `old_block_record` is null. Set by
+   *  the bash script when its block-record helper fails (chia python
+   *  missing, BlockRecord.from_bytes blew up, row missing mid-scan, etc.).
+   *  Surfaced into the alert email body so the recipient sees the actual
+   *  failure cause instead of a misleadingly minimal `{ timestamp }` dump.
+   *  Null when `old_block_record` was successfully decoded OR when the
+   *  field was omitted entirely (older script versions). */
+  old_block_record_error: string | null;
 };
 
 export type LocalScanResult = {
@@ -199,6 +207,18 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
       if (!validateBlockRecordShape(obr_raw)) return null;
       old_block_record = obr_raw as Record<string, unknown>;
     }
+    // Optional diagnostic. Must be either null or a reasonably-sized
+    // string. We don't trust this to be safe HTML/markdown — the email
+    // renderer flows it into a plain-text body line. Cap at 512 chars
+    // to keep email bodies bounded; truncate quietly rather than reject
+    // (the field is best-effort anyway).
+    const obr_err_raw =
+      e.old_block_record_error === undefined ? null : e.old_block_record_error;
+    let old_block_record_error: string | null = null;
+    if (obr_err_raw !== null) {
+      if (typeof obr_err_raw !== 'string') return null;
+      old_block_record_error = obr_err_raw.slice(0, 512);
+    }
     reorgs.push({
       low: e.low,
       high: e.high,
@@ -208,6 +228,7 @@ export function validateLocalScanResult(raw: unknown): LocalScanResult | null {
       old_hash,
       new_hash,
       old_block_record,
+      old_block_record_error,
     });
   }
   return {

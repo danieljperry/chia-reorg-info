@@ -53,6 +53,12 @@ export type SourceEvent = {
    *  timestamp. Null/undefined when the source can't supply it (e.g.
    *  older bash script, chia-blockchain not importable, etc.). */
   old_block_record?: Record<string, unknown> | null;
+  /** Reason the source couldn't supply `old_block_record`. Surfaced into
+   *  the alert email body when the record is null so recipients see the
+   *  actual failure cause instead of a misleadingly minimal {timestamp}.
+   *  Null/undefined when the record was successfully retrieved OR when
+   *  this field isn't carried by this source. */
+  old_block_record_error?: string | null;
 };
 
 export type DispatchOutcome =

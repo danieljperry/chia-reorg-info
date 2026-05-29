@@ -303,6 +303,53 @@ describe('validateLocalScanResult', () => {
     expect(validateLocalScanResult(v)).toBeNull();
   });
 
+  it('accepts old_block_record_error as a string and propagates it', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: null,
+        old_block_record_error: 'decode-failed: 100:aabb: BlockRecord.from_bytes blew up',
+      }],
+    };
+    const result = validateLocalScanResult(v);
+    expect(result?.reorgs[0]?.old_block_record_error).toBe(
+      'decode-failed: 100:aabb: BlockRecord.from_bytes blew up'
+    );
+  });
+
+  it('treats missing old_block_record_error as null (older bash script versions)', () => {
+    // valid.reorgs[0] doesn't include the field — accepted, stays null.
+    const result = validateLocalScanResult(valid);
+    expect(result?.reorgs[0]?.old_block_record_error).toBeNull();
+  });
+
+  it('truncates old_block_record_error to 512 chars to keep emails bounded', () => {
+    const huge = 'x'.repeat(2000);
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: null,
+        old_block_record_error: huge,
+      }],
+    };
+    const result = validateLocalScanResult(v);
+    expect(result?.reorgs[0]?.old_block_record_error?.length).toBe(512);
+  });
+
+  it('rejects old_block_record_error as a non-string non-null value', () => {
+    const v = {
+      ...valid,
+      reorgs: [{
+        low: 1, high: 1, depth: 1, ts_low_unix: null, ts_high_unix: null,
+        old_block_record: null,
+        old_block_record_error: { not: 'a string' },
+      }],
+    };
+    expect(validateLocalScanResult(v)).toBeNull();
+  });
+
   // ---- BlockRecord field-level validation (L-6 fix) ----
   // Defense in depth against a tampered DB or malicious chia helper output:
   // even though JSON.stringify safely escapes any string content, a record

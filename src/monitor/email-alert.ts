@@ -117,18 +117,38 @@ export async function sendReorgAlert(
 
   const blockSections = sorted
     .map((reorg, i) => {
+      const unavailableReason = recordUnavailableReason(reorg.old_block_record);
+      const foliageTs = unavailableReason !== null
+        ? (reorg.old_block_record as { foliage_timestamp_unix?: unknown }).foliage_timestamp_unix
+        : null;
       const isTxBlock =
-        (reorg.old_block_record as { timestamp?: unknown }).timestamp != null;
+        unavailableReason !== null
+          ? foliageTs != null
+          : (reorg.old_block_record as { timestamp?: unknown }).timestamp != null;
       const depthLine =
         reorg.depth === reorg.max_depth
           ? `  Depth:        ${reorg.depth} block(s) (size of the re-org cascade)`
           : `  Depth:        ${reorg.depth}-${reorg.max_depth} block(s) (observed cascade is ${reorg.depth}; up to ${reorg.max_depth - reorg.depth} more block(s) above were never compared)`;
-      // Non-tx blocks carry no timestamp and nothing else worth dumping —
-      // skip the JSON body and just note the block type to keep the email
-      // compact.
-      const origBlockSection = isTxBlock
-        ? buildTxBlockSection(reorg, attachments, INLINE_LIMIT_BYTES, ATTACHMENT_LIMIT_BYTES)
-        : [`  The original block was a non-tx block (no canonical contents available).`];
+      // Four paths for the "original block contents" section:
+      //   1. Unavailable sentinel + foliage timestamp known — we expected
+      //      a record (was a tx block) but couldn't decode; report the
+      //      reason explicitly. Don't dump the sentinel JSON — it'd
+      //      just confuse the reader.
+      //   2. Unavailable sentinel + no foliage timestamp — genuinely
+      //      non-tx; nothing was expected. Use the original "non-tx"
+      //      wording, not "unavailable" (which implies we wanted data
+      //      and didn't get it).
+      //   3. Tx block with a decoded record — render via buildTxBlockSection.
+      //   4. Non-tx block (no sentinel, no record timestamp) — single
+      //      line, nothing to dump.
+      const origBlockSection =
+        unavailableReason !== null
+          ? isTxBlock
+            ? buildUnavailableSection(unavailableReason)
+            : [`  The original block was a non-tx block (no canonical contents available).`]
+          : isTxBlock
+          ? buildTxBlockSection(reorg, attachments, INLINE_LIMIT_BYTES, ATTACHMENT_LIMIT_BYTES)
+          : [`  The original block was a non-tx block (no canonical contents available).`];
       return [
         `Block ${i + 1}:`,
         ``,
@@ -185,6 +205,29 @@ export async function sendReorgAlert(
     log('error', 'Re-org alert email failed', { to, subject, error: safeMessage(err) });
     throw err;
   }
+}
+
+/**
+ * If `record` is the `{ _unavailable: string, ... }` sentinel produced by
+ * `synthesizeReorgEventFromLocal` when the bash decoder failed, return the
+ * reason string. Otherwise null. Keeps the check structural so renaming
+ * the sentinel key here propagates cleanly without scattered any-casts.
+ */
+function recordUnavailableReason(record: unknown): string | null {
+  if (typeof record !== 'object' || record === null) return null;
+  if (!('_unavailable' in record)) return null;
+  const u = (record as { _unavailable?: unknown })._unavailable;
+  if (typeof u !== 'string' || u.length === 0) return 'unavailable';
+  return u;
+}
+
+function buildUnavailableSection(reason: string): string[] {
+  // Reason may contain colons / spaces (e.g. "decode-failed: H:HH: ChildProcessError")
+  // — indent it as a continuation line so the block stays scannable.
+  return [
+    `  The original block was a tx block, but its block record could not be decoded:`,
+    `    ${reason}`,
+  ];
 }
 
 function formatSize(bytes: number): string {

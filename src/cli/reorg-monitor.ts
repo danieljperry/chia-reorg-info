@@ -512,12 +512,28 @@ function localReorgToSourceEvent(r: LocalReorg & { detected_at_iso: string }): S
     old_header_hash: r.old_hash,
     new_header_hash: r.new_hash,
     old_block_record: r.old_block_record,
+    old_block_record_error: r.old_block_record_error,
   };
 }
 
 function synthesizeReorgEventFromLocal(
   r: LocalReorg & { detected_at_iso: string }
 ): ReorgEvent {
+  // When the bash script couldn't decode the orphan's BlockRecord, emit
+  // an explicit "unavailable" sentinel rather than fabricating a
+  // {timestamp} dict. The old fallback rendered as a one-line tx-block
+  // dump in the alert email and looked like the chain's actual content,
+  // hiding the underlying decode failure. The new shape is recognized
+  // by the email renderer, which prints the failure reason instead.
+  const old_block_record: Record<string, unknown> =
+    r.old_block_record ??
+    {
+      _unavailable: r.old_block_record_error ?? 'local poller did not provide a block record',
+      // Preserve the foliage timestamp when we have it so the renderer
+      // can still identify this as a tx block — we lost the record, not
+      // the knowledge that one existed.
+      foliage_timestamp_unix: r.ts_high_unix ?? null,
+    };
   return {
     height: r.high,
     old_header_hash: r.old_hash ?? '(unavailable — local DB detection)',
@@ -526,10 +542,7 @@ function synthesizeReorgEventFromLocal(
     depth: r.depth,
     max_depth: r.depth,
     blocks_from_peak: 0,
-    // Prefer the full decoded BlockRecord from the bash script when present;
-    // fall back to a minimal {timestamp} object (the old behavior) so the
-    // email still has at least the tx-block indicator.
-    old_block_record: r.old_block_record ?? { timestamp: r.ts_high_unix ?? null },
+    old_block_record,
   };
 }
 
@@ -642,6 +655,23 @@ export function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
   const localFallback = '(unavailable — local DB detection)';
   const coinsetFallback = '(see Coinset event)';
   const fallback = s.source === 'local' ? localFallback : coinsetFallback;
+
+  // When the source couldn't supply a BlockRecord, emit the same
+  // { _unavailable, foliage_timestamp_unix } sentinel as
+  // synthesizeReorgEventFromLocal so the email renderer prints the
+  // failure reason rather than fabricating a misleading {timestamp}.
+  // Per-source default reasons keep the message specific.
+  const defaultReason =
+    s.source === 'local'
+      ? 'local poller did not provide a block record'
+      : 'Coinset did not provide a block record';
+  const old_block_record: Record<string, unknown> =
+    s.old_block_record ??
+    {
+      _unavailable: s.old_block_record_error ?? defaultReason,
+      foliage_timestamp_unix: s.ts_high_unix ?? null,
+    };
+
   return {
     height: s.source === 'coinset' ? s.low : s.high,
     old_header_hash: s.old_header_hash ?? fallback,
@@ -650,10 +680,6 @@ export function synthesizeReorgEventFromSource(s: SourceEvent): ReorgEvent {
     depth: s.depth,
     max_depth: s.max_depth,
     blocks_from_peak: 0,
-    // Prefer the full BlockRecord plumbed through SourceEvent (from either
-    // the Coinset RPC response or the local DB via the bash script's
-    // chia python helper). Fall back to {timestamp} so the email's
-    // tx/non-tx detection still works.
-    old_block_record: s.old_block_record ?? { timestamp: s.ts_high_unix ?? null },
+    old_block_record,
   };
 }

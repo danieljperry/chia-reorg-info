@@ -759,14 +759,68 @@ if [[ "$JSON_OUT" == "true" ]]; then
     fi
   done
   BR_TSV=""
+  BR_STDERR=""
+  BR_EXIT=0
+  BR_HELPER_MISSING=""
   if [[ -n "$br_pairs" && -r "$BR_HELPER" ]]; then
-    BR_TSV=$(printf '%s' "$br_pairs" | "$CHIA_PYTHON_BIN" "$BR_HELPER" "$DB_PATH" 2>/dev/null || true)
+    # Capture stderr so per-cluster decode failures can be surfaced into the
+    # JSON output as old_block_record_error. Previously redirected to
+    # /dev/null, which silently degraded the alert email to just a timestamp
+    # whenever chia python / BlockRecord.from_bytes blew up.
+    BR_STDERR_FILE=$(mktemp)
+    BR_TSV=$(printf '%s' "$br_pairs" | "$CHIA_PYTHON_BIN" "$BR_HELPER" "$DB_PATH" 2>"$BR_STDERR_FILE") || BR_EXIT=$?
+    BR_STDERR=$(<"$BR_STDERR_FILE")
+    rm -f "$BR_STDERR_FILE"
+  elif [[ -n "$br_pairs" && ! -r "$BR_HELPER" ]]; then
+    BR_HELPER_MISSING="block-record helper not readable at $BR_HELPER"
   fi
+  # When the helper itself fails (non-zero exit — typically chia python
+  # missing or unimportable), all clusters share the same root cause.
+  # Extract the first non-comment stderr line as a one-shot error.
+  BR_TOP_ERROR=""
+  if [[ $BR_EXIT -ne 0 || -n "$BR_HELPER_MISSING" ]]; then
+    if [[ -n "$BR_HELPER_MISSING" ]]; then
+      BR_TOP_ERROR="$BR_HELPER_MISSING"
+    else
+      BR_TOP_ERROR=$(grep -v '^#' <<< "$BR_STDERR" | head -1)
+      [[ -z "$BR_TOP_ERROR" ]] && BR_TOP_ERROR="block-record helper exited $BR_EXIT with no diagnostic"
+    fi
+  fi
+  # Minimal JSON-string escape: backslash, double-quote, control chars.
+  # Sufficient for the helper's error format (ASCII identifiers, Python
+  # exception messages). Used in two contexts so factored out.
+  _json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '%s' "$s"
+  }
   _br_json_for() {
     local h=$1 hh=$2 v
     v=$(awk -F '\t' -v h="$h" -v hh="$hh" '$1 == h && $2 == hh { print $3; exit }' <<< "$BR_TSV")
     [[ -z "$v" ]] && v="null"
     printf '%s' "$v"
+  }
+  _br_error_for() {
+    # Return a JSON value (either "null" or a quoted string) describing
+    # why this cluster's old_block_record is unavailable. Looked up only
+    # when _br_json_for returned null. The helper writes one of:
+    #   # missing: H:HH            — row gone from the DB
+    #   # decode-failed: H:HH: ERR — BlockRecord.from_bytes blew up
+    # Anything else is a top-level helper failure (BR_TOP_ERROR).
+    local h=$1 hh=$2 err
+    err=$(grep -E "^# (decode-failed|missing): ${h}:${hh}" <<< "$BR_STDERR" | head -1 | sed 's/^# //')
+    if [[ -z "$err" && -n "$BR_TOP_ERROR" ]]; then
+      err="$BR_TOP_ERROR"
+    fi
+    if [[ -z "$err" ]]; then
+      printf 'null'
+    else
+      printf '"%s"' "$(_json_escape "$err")"
+    fi
   }
 
   json_reorgs=""
@@ -795,8 +849,12 @@ if [[ "$JSON_OUT" == "true" ]]; then
     if [[ -n "$old_hash" ]]; then old_hash_json="\"$old_hash\""; else old_hash_json="null"; fi
     if [[ -n "$new_hash" ]]; then new_hash_json="\"$new_hash\""; else new_hash_json="null"; fi
     obr_json=$(_br_json_for "$high" "$old_hash")
+    obr_err_json="null"
+    if [[ "$obr_json" == "null" ]]; then
+      obr_err_json=$(_br_error_for "$high" "$old_hash")
+    fi
     if [[ -n "$json_reorgs" ]]; then json_reorgs+=","; fi
-    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high,\"old_hash\":$old_hash_json,\"new_hash\":$new_hash_json,\"old_block_record\":$obr_json}"
+    json_reorgs+="{\"low\":$low,\"high\":$high,\"depth\":$depth,\"ts_low_unix\":$ts_low,\"ts_high_unix\":$ts_high,\"old_hash\":$old_hash_json,\"new_hash\":$new_hash_json,\"old_block_record\":$obr_json,\"old_block_record_error\":$obr_err_json}"
   done
   printf '{"network":"mainnet","start_height":%d,"end_height":%d,"scanned_at_unix":%d,"peak_at_scan":%d,"reorgs":[%s]}\n' \
     "$START_HEIGHT" "$END_HEIGHT" "$(date +%s)" "$END_HEIGHT" "$json_reorgs"

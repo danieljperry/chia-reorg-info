@@ -217,6 +217,32 @@ describe('reorg-finder.sh end-to-end (synthetic DB)', () => {
     expect(reorgs[0]!.new_hash).toBe('a0'.padEnd(64, '0'));
   });
 
+  it('--json reorg with undecodable block_record surfaces old_block_record_error (not silent null)', () => {
+    // The synthetic DB doesn't have valid chia BlockRecord blobs in its
+    // block_record column (the helper builds rows with just the `block`
+    // bytes), so the decoder will either be unimportable (no chia) or
+    // BlockRecord.from_bytes will throw. Either way, the bash script must
+    // surface a string error rather than just emitting null silently —
+    // that was the original bug (PR #532's misleading {timestamp} fallback
+    // depended on this silence).
+    const db = buildDb(dir, [
+      { height: 100, header_hash: 'a0'.padEnd(64, '0'), in_main_chain: 1 },
+      { height: 100, header_hash: 'b0'.padEnd(64, '0'), in_main_chain: 0 },
+      { height: 101, header_hash: 'a1'.padEnd(64, '0'), in_main_chain: 1 },
+    ]);
+    const r = run(['-d', db, '-e', '101', '-n', '2', '--peak-from', 'db', '--json']);
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout) as Record<string, unknown>;
+    const reorgs = parsed.reorgs as Array<Record<string, unknown>>;
+    expect(reorgs).toHaveLength(1);
+    // Either chia python is unavailable (error: BlockRecord not importable)
+    // OR BlockRecord.from_bytes fails on the synthetic blob — both produce
+    // a non-null error string.
+    expect(reorgs[0]!.old_block_record).toBeNull();
+    expect(typeof reorgs[0]!.old_block_record_error).toBe('string');
+    expect((reorgs[0]!.old_block_record_error as string).length).toBeGreaterThan(0);
+  });
+
   it('--json emits reorgs: [] for a clean range', () => {
     const db = buildDb(dir, [
       { height: 100, header_hash: 'a0'.padEnd(64, '0'), in_main_chain: 1 },
