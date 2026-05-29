@@ -128,7 +128,7 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).not.toContain('"timestamp"');
   });
 
-  it('email body for a tx block keeps the JSON dump of the record', async () => {
+  it('email body for a tx block keeps the JSON dump of the record (real record present)', async () => {
     mockSendMail.mockClear();
     const localSource = {
       source: 'local' as const,
@@ -138,9 +138,15 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
       depth: 1,
       max_depth: 1,
       detected_at_iso: '2026-05-25T02:45:27.985Z',
-      ts_high_unix: 1_748_097_540, // tx block → timestamp populated
+      ts_high_unix: 1_748_097_540,
       old_header_hash: 'aa',
       new_header_hash: 'bb',
+      // Real decoded BlockRecord present — render the JSON dump.
+      old_block_record: {
+        timestamp: 1_748_097_540,
+        weight: 12345,
+        signage_point_index: 7,
+      },
     };
     const evt = synthesizeReorgEventFromSource(localSource);
     await sendReorgAlert('alice@example.com', 'mainnet', [evt], 100, {});
@@ -148,6 +154,39 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).toContain('The original block was a tx block with the following contents:');
     expect(body).toContain('"timestamp"');
     expect(body).toContain('1748097540');
+    expect(body).toContain('"weight"');
+    expect(body).toContain('12345');
+    // No unavailable sentinel leaks through.
+    expect(body).not.toContain('_unavailable');
+    expect(body).not.toContain('foliage_timestamp_unix');
+  });
+
+  it('email body for a tx block whose record decode failed reports the failure reason', async () => {
+    // When the bash decoder fails, synthesizeReorgEventFromLocal emits an
+    // { _unavailable, foliage_timestamp_unix } sentinel and the renderer
+    // surfaces the reason rather than fabricating a JSON dump.
+    mockSendMail.mockClear();
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T02:45:27.985Z',
+      ts_high_unix: 1_748_097_540, // tx block → foliage timestamp known
+      old_header_hash: 'aa',
+      new_header_hash: 'bb',
+      // No old_block_record — decoder failed upstream.
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    await sendReorgAlert('alice@example.com', 'mainnet', [evt], 100, {});
+    const body = (mockSendMail.mock.calls[0]?.[0] as { text: string }).text;
+    expect(body).toContain('The original block was a tx block, but its block record could not be decoded:');
+    expect(body).toContain('local poller did not provide a block record');
+    // No misleading JSON dump anymore.
+    expect(body).not.toContain('"timestamp": 1748097540');
+    expect(body).not.toContain('The original block was a tx block with the following contents:');
   });
 
   it('LARGE old_block_record (>= 250 KiB) is dropped with size message; no attachment', async () => {
@@ -327,7 +366,7 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
     expect(body).toContain('The original block was a tx block with the following contents:');
   });
 
-  it('local source WITHOUT old_block_record falls back to {timestamp} (preserves old behavior)', () => {
+  it('local source WITHOUT old_block_record produces _unavailable sentinel (not a fake {timestamp})', () => {
     const localSource = {
       source: 'local' as const,
       low: 100,
@@ -339,7 +378,32 @@ describe('matched-outcome email subject uses local node depth, not Coinset range
       ts_high_unix: 1700000000,
     };
     const evt = synthesizeReorgEventFromSource(localSource);
-    expect(evt.old_block_record).toEqual({ timestamp: 1700000000 });
+    // The sentinel makes the failure honest. Foliage timestamp is
+    // preserved separately so the renderer can still mark this as a
+    // tx block when reporting the failure.
+    expect(evt.old_block_record).toEqual({
+      _unavailable: 'local poller did not provide a block record',
+      foliage_timestamp_unix: 1700000000,
+    });
+  });
+
+  it('local source with old_block_record_error preserves the reason in the sentinel', () => {
+    const localSource = {
+      source: 'local' as const,
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T00:00:00Z',
+      ts_high_unix: 1700000000,
+      old_block_record_error: 'decode-failed: 100:aabb: bad BlockRecord',
+    };
+    const evt = synthesizeReorgEventFromSource(localSource);
+    expect(evt.old_block_record).toEqual({
+      _unavailable: 'decode-failed: 100:aabb: bad BlockRecord',
+      foliage_timestamp_unix: 1700000000,
+    });
   });
 
   it('local source with null hashes falls back to "(unavailable — local DB detection)"', () => {

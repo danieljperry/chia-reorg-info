@@ -285,7 +285,10 @@ describe('old_block_record propagation through the dual-source pipeline', () => 
     expect(evt.old_block_record).toBe(fullRecord);
   });
 
-  it('synthesizeReorgEventFromSource falls back to {timestamp} when old_block_record absent', () => {
+  it('synthesizeReorgEventFromSource emits unavailable sentinel when old_block_record absent (coinset)', () => {
+    // Previously fell back to { timestamp: ts_high_unix } which looked
+    // like real block contents in the email. Now we emit an explicit
+    // sentinel so the renderer surfaces the failure cause.
     const s: SourceEvent = {
       source: 'coinset',
       low: 100,
@@ -297,7 +300,29 @@ describe('old_block_record propagation through the dual-source pipeline', () => 
       ts_high_unix: 1700000000,
     };
     const evt = synthesizeReorgEventFromSource(s);
-    expect(evt.old_block_record).toEqual({ timestamp: 1700000000 });
+    expect(evt.old_block_record).toEqual({
+      _unavailable: 'Coinset did not provide a block record',
+      foliage_timestamp_unix: 1700000000,
+    });
+  });
+
+  it('synthesizeReorgEventFromSource preserves old_block_record_error in the sentinel', () => {
+    const s: SourceEvent = {
+      source: 'local',
+      low: 100,
+      high: 100,
+      settle_at: 100,
+      depth: 1,
+      max_depth: 1,
+      detected_at_iso: '2026-05-25T00:00:00Z',
+      ts_high_unix: 1700000000,
+      old_block_record_error: 'decode-failed: 100:aabb: bad BlockRecord blob',
+    };
+    const evt = synthesizeReorgEventFromSource(s);
+    expect(evt.old_block_record).toEqual({
+      _unavailable: 'decode-failed: 100:aabb: bad BlockRecord blob',
+      foliage_timestamp_unix: 1700000000,
+    });
   });
 });
 
