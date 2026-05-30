@@ -2,6 +2,7 @@ import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { type BridgeInfo, runBridgeSearchForBatch } from '../monitor/bridge-info.js';
 import {
   createDualSource,
   type DispatchOutcome,
@@ -306,6 +307,16 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
     'reorg-finder.sh'
   );
 
+  // Bridge-info provider: closure capturing the DB path so every dispatch
+  // site can call it without repeating the wiring. Only wired when the DB
+  // path is readable — coinset-only deployments without a node have nothing
+  // to scan, so we skip the closure entirely (cheaper than per-call
+  // accessSync() failures) and rely on `searchBridges`'s internal skip
+  // to also handle late-vanishing DBs.
+  const bridgeInfoProvider: (events: ReorgEvent[]) => Promise<BridgeInfo | undefined> = (
+    events
+  ) => runBridgeSearchForBatch(events, { dbPath: args.dbPath });
+
   // -------------------------------------------------------------------------
   // Wire pollers + dispatcher per source mode.
   // -------------------------------------------------------------------------
@@ -317,7 +328,7 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
     // Dual-source: pollers feed events into the coordinator; dispatch happens
     // on settle (high + 2 blocks past both sources' peaks).
     const coordinator = createDualSource('both', (outcome) => {
-      dispatchDualOutcome(outcome, args.recipients, args.network);
+      dispatchDualOutcome(outcome, args.recipients, args.network, bridgeInfoProvider);
     });
 
     // Coinset poller: alert_recipients is empty so inline dispatch is a no-op;
@@ -354,12 +365,15 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
       },
     });
   } else if (wantsCoinset) {
-    // Single-source coinset: today's behavior, unchanged.
+    // Single-source coinset: today's behavior, plus the bridge-info hook so
+    // each per-poll dispatch batch runs the search once before the
+    // recipient loop.
     startMonitor({
       network: args.network,
       poll_interval_seconds: args.pollIntervalSeconds,
       lookback_blocks: args.lookbackBlocks,
       alert_recipients: args.recipients,
+      bridge_info_provider: bridgeInfoProvider,
     });
   } else {
     // Single-source local: per-recipient dispatch happens directly from the
@@ -371,7 +385,13 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
       lookback_blocks: args.localLookbackBlocks,
       on_reorg: (r) => {
         const evt = synthesizeReorgEventFromLocal(r);
-        dispatchToRecipients([evt], args.recipients, args.network, evt.blocks_from_peak + evt.height);
+        void dispatchToRecipients(
+          [evt],
+          args.recipients,
+          args.network,
+          evt.blocks_from_peak + evt.height,
+          { bridgeInfoProvider }
+        );
       },
     });
   }
@@ -546,24 +566,47 @@ function synthesizeReorgEventFromLocal(
   };
 }
 
-function dispatchToRecipients(
+export async function dispatchToRecipients(
   events: ReorgEvent[],
   recipients: AlertRecipient[],
   network: Network,
   peakHeight: number,
-  extras: { subjectSuffix?: string; introPrepend?: string } = {}
-): void {
+  extras: {
+    subjectSuffix?: string;
+    introPrepend?: string;
+    /** Resolved ONCE here (before iterating recipients) so the python
+     *  subprocess doesn't run per recipient. Failure → no bridge section
+     *  in any email. Provider also writes the formatted bridge text to
+     *  the log file when matches are found, so the log entry happens
+     *  regardless of recipient eligibility. */
+    bridgeInfoProvider?: (events: ReorgEvent[]) => Promise<BridgeInfo | undefined>;
+  } = {}
+): Promise<void> {
+  let bridgeInfo: BridgeInfo | undefined;
+  if (extras.bridgeInfoProvider !== undefined && events.length > 0) {
+    try {
+      bridgeInfo = await extras.bridgeInfoProvider(events);
+    } catch (err) {
+      log('warn', 'Bridge info provider threw', { error: safeMessage(err) });
+    }
+  }
   for (const recipient of recipients) {
     const eligible = events.filter((e) => e.max_depth >= recipient.min_blocks);
     if (eligible.length === 0) continue;
-    sendReorgAlert(recipient.email, network, eligible, peakHeight, extras).catch(
-      (err: unknown) => {
-        log('error', 'Re-org alert email failed', {
-          to: recipient.email,
-          error: safeMessage(err),
-        });
-      }
-    );
+    const sendExtras: {
+      subjectSuffix?: string;
+      introPrepend?: string;
+      bridgeInfo?: BridgeInfo;
+    } = {};
+    if (extras.subjectSuffix !== undefined) sendExtras.subjectSuffix = extras.subjectSuffix;
+    if (extras.introPrepend !== undefined) sendExtras.introPrepend = extras.introPrepend;
+    if (bridgeInfo !== undefined) sendExtras.bridgeInfo = bridgeInfo;
+    sendReorgAlert(recipient.email, network, eligible, peakHeight, sendExtras).catch((err: unknown) => {
+      log('error', 'Re-org alert email failed', {
+        to: recipient.email,
+        error: safeMessage(err),
+      });
+    });
   }
 }
 
@@ -584,7 +627,8 @@ function formatRangeWindow(low: number, high: number, source: 'coinset' | 'local
 function dispatchDualOutcome(
   outcome: DispatchOutcome,
   recipients: AlertRecipient[],
-  network: Network
+  network: Network,
+  bridgeInfoProvider?: (events: ReorgEvent[]) => Promise<BridgeInfo | undefined>
 ): void {
   log('info', 'Reorg comparison', {
     kind: outcome.kind,
@@ -605,9 +649,10 @@ function dispatchDualOutcome(
       `The same reorg of ${n} block(s) from height ${a} to ${b} was detected from ` +
       `${when} on both Coinset and the local database.`;
     const evt = synthesizeReorgEventFromSource(outcome.local);
-    dispatchToRecipients([evt], recipients, network, b, {
+    void dispatchToRecipients([evt], recipients, network, b, {
       subjectSuffix: ' — confirmed by Coinset + local DB',
       introPrepend: intro,
+      ...(bridgeInfoProvider !== undefined ? { bridgeInfoProvider } : {}),
     });
     return;
   }
@@ -620,9 +665,10 @@ function dispatchDualOutcome(
       `A reorg from height ${a} to ${b} was detected from ${when} on Coinset only. ` +
       `This reorg was not detected in the local database.`;
     const evt = synthesizeReorgEventFromSource(outcome.event);
-    dispatchToRecipients([evt], recipients, network, b, {
+    void dispatchToRecipients([evt], recipients, network, b, {
       subjectSuffix: ' — Coinset only',
       introPrepend: intro,
+      ...(bridgeInfoProvider !== undefined ? { bridgeInfoProvider } : {}),
     });
     return;
   }
@@ -635,9 +681,10 @@ function dispatchDualOutcome(
     `A reorg from height ${a} to ${b} was detected from ${when} in the local ` +
     `database only. This reorg was not detected on Coinset.`;
   const evt = synthesizeReorgEventFromSource(outcome.event);
-  dispatchToRecipients([evt], recipients, network, b, {
+  void dispatchToRecipients([evt], recipients, network, b, {
     subjectSuffix: ' — local DB only',
     introPrepend: intro,
+    ...(bridgeInfoProvider !== undefined ? { bridgeInfoProvider } : {}),
   });
 }
 

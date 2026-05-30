@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import nodemailer from 'nodemailer';
 import { log, logBlock } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
+import type { BridgeInfo } from './bridge-info.js';
 import type { ReorgEvent } from './reorg-monitor.js';
 
 function parsePort(): number {
@@ -53,6 +54,11 @@ export type EmailExtras = {
   /** Prepended to the body (before the existing intro). Used by dual-source
    *  mode to insert the "same reorg / Coinset only / local only" sentence. */
   introPrepend?: string;
+  /** Pre-rendered Bridge Info section to append to the body when the batch
+   *  contained bridge spends. The same instance is shared across all
+   *  recipients of one batch — the dispatcher computes it once and passes
+   *  it to every `sendReorgAlert` call. */
+  bridgeInfo?: BridgeInfo;
 };
 
 export async function sendReorgAlert(
@@ -113,6 +119,12 @@ export async function sendReorgAlert(
   //   payloads (e.g. a malicious chain producing huge reward_claims arrays).
   const INLINE_LIMIT_BYTES = 25 * 1024;
   const ATTACHMENT_LIMIT_BYTES = 250 * 1024;
+  // Bridge Info has its own independent size tier (same 25 KiB / 250 KiB
+  // thresholds applied to the formatted text, not combined with the
+  // block-record budget). A re-org with both a large block record AND
+  // large bridge info could therefore produce two attachments.
+  const BRIDGE_INFO_INLINE_LIMIT_BYTES = 25 * 1024;
+  const BRIDGE_INFO_ATTACHMENT_LIMIT_BYTES = 250 * 1024;
   const attachments: Array<{ filename: string; content: string }> = [];
 
   const blockSections = sorted
@@ -172,9 +184,22 @@ export async function sendReorgAlert(
   const localTime = now.toLocaleTimeString();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const peakLine = `Peak height at detection: ${peakHeight.toLocaleString()} (${localDate} ${localTime} ${timeZone})`;
-  const parts = extras.introPrepend
+  const parts: string[] = extras.introPrepend
     ? [extras.introPrepend, ``, intro, peakLine, ``, blockSections]
     : [intro, peakLine, ``, blockSections];
+
+  if (extras.bridgeInfo !== undefined) {
+    parts.push(
+      ``,
+      ...buildBridgeInfoSection(
+        extras.bridgeInfo,
+        attachments,
+        BRIDGE_INFO_INLINE_LIMIT_BYTES,
+        BRIDGE_INFO_ATTACHMENT_LIMIT_BYTES
+      )
+    );
+  }
+
   const text = parts.join('\n');
 
   const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? 'chia-reorg-info@localhost';
@@ -281,5 +306,56 @@ function buildTxBlockSection(
   return [
     `  The original block was a tx block.`,
     `  Block record not included due to its large size: ${formatSize(sizeBytes)}.`,
+  ];
+}
+
+/**
+ * Build the trailing "Bridge Info" section when the batch contained bridge
+ * spends. Same three-tier size handling as `buildTxBlockSection`:
+ *   1. Below `inlineLimit`: paste the formatter's output inline (status quo
+ *      for `reorg-finder.sh -b`).
+ *   2. Between `inlineLimit` and `attachmentLimit`: attach as
+ *      `bridge-info-<low>-<high>.txt` and reference it from the body.
+ *   3. At or above `attachmentLimit`: omit and just report the size.
+ *
+ * The header ("Bridge Info:") and the user-spec'd leading statement
+ * ("This reorg included bridge spends with the following details:")
+ * appear in all three tiers — even when the body is omitted, the reader
+ * knows what was checked and why a Bridge Info entry exists at all.
+ */
+function buildBridgeInfoSection(
+  info: BridgeInfo,
+  attachments: Array<{ filename: string; content: string }>,
+  inlineLimit: number,
+  attachmentLimit: number
+): string[] {
+  const sizeBytes = Buffer.byteLength(info.formattedText, 'utf8');
+  const header = [
+    `Bridge Info:`,
+    ``,
+    `  This reorg included bridge spends with the following details:`,
+    ``,
+  ];
+
+  if (sizeBytes < inlineLimit) {
+    // The formatter already indents its output with two spaces, matching
+    // the body's indentation style. Trim a trailing newline if present
+    // so the section doesn't sprout a blank line at the end.
+    const trimmed = info.formattedText.replace(/\n+$/, '');
+    return [...header, trimmed];
+  }
+
+  if (sizeBytes < attachmentLimit) {
+    const filename = `bridge-info-${info.lowHeight}-${info.highHeight}.txt`;
+    attachments.push({ filename, content: info.formattedText });
+    return [
+      ...header,
+      `  Bridge info attached as ${filename} (${formatSize(sizeBytes)}).`,
+    ];
+  }
+
+  return [
+    ...header,
+    `  Bridge info not included due to its large size: ${formatSize(sizeBytes)}.`,
   ];
 }
