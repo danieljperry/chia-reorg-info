@@ -4,6 +4,7 @@ import { isHex32, stripHexPrefix } from '../chia/hex.js';
 import { Network } from '../network.js';
 import { log } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
+import type { BridgeInfo } from './bridge-info.js';
 import { sendReorgAlert } from './email-alert.js';
 
 export type ReorgEvent = {
@@ -75,6 +76,15 @@ const state = {
   // dispatch is a no-op) and routes through the dual-source coordinator.
   onReorgBatch: null as ((events: ReorgEvent[]) => void) | null,
   onPeak: null as ((peak: number) => void) | null,
+  // Optional async hook: when set, called once per per-poll dispatch batch
+  // (before iterating recipients) to produce a BridgeInfo to attach to all
+  // emails in the batch. The same instance is passed to every
+  // sendReorgAlert call. Failure / no-matches → undefined → no Bridge
+  // Info section in any email. Logging of the bridge result is the
+  // provider's responsibility.
+  bridgeInfoProvider: null as
+    | ((events: ReorgEvent[]) => Promise<BridgeInfo | undefined>)
+    | null,
 };
 
 function redactEmail(email: string): string {
@@ -261,6 +271,20 @@ export async function _pollOnce(): Promise<void> {
     }
     if (state.onPeak !== null) state.onPeak(peak);
 
+    // Resolve Bridge Info once per batch BEFORE iterating recipients, so the
+    // (potentially slow) python subprocess only runs once even when multiple
+    // recipients are eligible. The provider also writes a Bridge Info entry
+    // to the log file when matches are found — that happens here regardless
+    // of whether any recipient is eligible.
+    let bridgeInfo: BridgeInfo | undefined;
+    if (state.bridgeInfoProvider !== null && newReorgsForAlert.length > 0) {
+      try {
+        bridgeInfo = await state.bridgeInfoProvider(newReorgsForAlert);
+      } catch (err) {
+        log('warn', 'Bridge info provider threw', { error: safeMessage(err) });
+      }
+    }
+
     // Send one batched email per recipient containing all eligible reorgs from this poll.
     // Filter on max_depth (worst-case true depth) so a re-org with uncertain
     // depth still alerts everyone whose threshold could be met. Honest by default.
@@ -275,8 +299,15 @@ export async function _pollOnce(): Promise<void> {
           eligible_depth_ranges: eligible.map((r) =>
             r.depth === r.max_depth ? `${r.depth}` : `${r.depth}-${r.max_depth}`
           ),
+          has_bridge_info: bridgeInfo !== undefined,
         });
-        sendReorgAlert(recipient.email, state.network, eligible, peak).catch((err: unknown) => {
+        sendReorgAlert(
+          recipient.email,
+          state.network,
+          eligible,
+          peak,
+          bridgeInfo !== undefined ? { bridgeInfo } : {}
+        ).catch((err: unknown) => {
           state.last_error = `Email alert failed: ${safeMessage(err)}`;
         });
       } else if (newReorgsForAlert.length > 0) {
@@ -333,6 +364,10 @@ export function startMonitor(opts: {
   on_reorg_batch?: (events: ReorgEvent[]) => void;
   /** Dual-source hook: called after each successful poll completes. */
   on_peak?: (peak: number) => void;
+  /** Optional async hook for Bridge Info: called once per per-poll dispatch
+   *  batch (before iterating recipients). When returns a BridgeInfo, that
+   *  same instance is attached to every email sent in the batch. */
+  bridge_info_provider?: (events: ReorgEvent[]) => Promise<BridgeInfo | undefined>;
 }): void {
   state.generation++;
   if (state.timer !== null) clearTimeout(state.timer);
@@ -343,6 +378,7 @@ export function startMonitor(opts: {
   state.alert_recipients = opts.alert_recipients ?? [];
   state.onReorgBatch = opts.on_reorg_batch ?? null;
   state.onPeak = opts.on_peak ?? null;
+  state.bridgeInfoProvider = opts.bridge_info_provider ?? null;
   state.started_at = new Date().toISOString();
   state.poll_count = 0;
   state.peak_height = null;
@@ -373,6 +409,7 @@ export function stopMonitor(): void {
   state.active = false;
   state.onReorgBatch = null;
   state.onPeak = null;
+  state.bridgeInfoProvider = null;
   if (wasActive) {
     log('info', 'Monitor stopped', {
       poll_count: state.poll_count,
