@@ -56,11 +56,21 @@ the script still exits 0. Only setup-level errors (no chia, bad args)
 exit non-zero.
 """
 
+import hashlib
 import json
 import sqlite3
 import sys
 import traceback
 from typing import Any
+
+# Chia condition opcodes used by the announcement-linkage walker. Created
+# announcements carry the raw message; asserted announcements carry the
+# pre-hashed announcement_id (sha256(coin_id || msg) for coin announcements,
+# sha256(puzzle_hash || msg) for puzzle announcements).
+_OP_CREATE_COIN_ANNOUNCEMENT = 60
+_OP_ASSERT_COIN_ANNOUNCEMENT = 61
+_OP_CREATE_PUZZLE_ANNOUNCEMENT = 62
+_OP_ASSERT_PUZZLE_ANNOUNCEMENT = 63
 
 try:
     import zstd as _zstd
@@ -401,34 +411,42 @@ def _classify_puzzle(
 
 def _extract_puzzle_reveals(
     block: FullBlock, db: sqlite3.Connection
-) -> tuple[dict[bytes, bytes], str]:
+) -> tuple[dict[bytes, bytes], dict[tuple[bytes, bytes, int], dict], str]:
     """Run the block's generator via chia python to get the raw spend
-    tuples, returning (puzzle_hash → puzzle_reveal_bytes, diagnostic_note).
+    tuples, returning:
+
+      (reveals_by_ph, spend_data_by_key, diagnostic_note)
+
+    - reveals_by_ph: puzzle_hash → puzzle_reveal_bytes (existing classifier
+      lookup; duplicate puzzle_hashes collide harmlessly — they share a reveal).
+    - spend_data_by_key: (parent_id, puzzle_hash, amount) → {parent_id,
+      puzzle_hash, amount, puzzle_reveal, solution}. The (parent, ph, amount)
+      triple uniquely identifies a coin without needing a `Coin` import.
+      Used by the announcement-linkage walker to look up solutions for
+      `puzzle.run(solution)` condition extraction.
 
     Tries several Program.run shapes because chia's API differs across
-    versions (some take args directly, some require run_with_cost with
-    a max_cost). On total failure, returns ({}, note explaining why).
-    On partial success, returns whatever reveals could be extracted plus
-    a note. On full success: (reveals, "extracted N reveals via <shape>")."""
+    versions. On total failure: ({}, {}, note). On partial success: returns
+    what could be extracted plus a note."""
     if _PROGRAM_CLS is None:
-        return {}, "chia python (Program) not importable"
+        return {}, {}, "chia python (Program) not importable"
     if block.transactions_generator is None:
-        return {}, "block has no transactions_generator"
+        return {}, {}, "block has no transactions_generator"
 
     refs: list[Any] = []
     for ref_h in block.transactions_generator_ref_list:
         ref_block = _get_canonical_block(db, int(ref_h))
         if ref_block is None or ref_block.transactions_generator is None:
-            return {}, f"ref block at height {int(ref_h)} unavailable"
+            return {}, {}, f"ref block at height {int(ref_h)} unavailable"
         try:
             refs.append(_PROGRAM_CLS.from_bytes(bytes(ref_block.transactions_generator)))
         except Exception as e:
-            return {}, f"ref block at {int(ref_h)} Program.from_bytes failed: {type(e).__name__}: {e}"
+            return {}, {}, f"ref block at {int(ref_h)} Program.from_bytes failed: {type(e).__name__}: {e}"
 
     try:
         gen_prog = _PROGRAM_CLS.from_bytes(bytes(block.transactions_generator))
     except Exception as e:
-        return {}, f"generator Program.from_bytes failed: {type(e).__name__}: {e}"
+        return {}, {}, f"generator Program.from_bytes failed: {type(e).__name__}: {e}"
 
     max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
 
@@ -463,25 +481,51 @@ def _extract_puzzle_reveals(
             continue
     if result is None:
         # Surface a compact summary of why every shape failed.
-        return {}, "Program.run failed for all shapes: " + " | ".join(errors[:3])
+        return {}, {}, "Program.run failed for all shapes: " + " | ".join(errors[:3])
 
     # Walk the result looking for (parent puzzle_reveal amount solution)
     # 4-tuples. The chia generator's exact output shape varies across
     # versions: sometimes a flat list of spend tuples, sometimes wrapped
     # one level deeper. We try both AND a recursive walker as fallback,
-    # then merge — duplicate puzzle_hash keys just overwrite each other.
+    # then merge — duplicate keys just overwrite each other.
     reveals: dict[bytes, bytes] = {}
+    spend_data: dict[tuple[bytes, bytes, int], dict] = {}
     strategy_counts: list[str] = []
     last_walk_err: str | None = None
 
     def _try_extract(node: Any) -> bool:
         nonlocal last_walk_err
         try:
-            puzzle = node.rest().first()
-            ph = bytes(puzzle.get_tree_hash())
+            # Spend tuple shape: (parent puzzle amount solution)
+            parent_node = node.first()
+            puzzle_node = node.rest().first()
+            amount_node = node.rest().rest().first()
+            solution_node = node.rest().rest().rest().first()
+
+            ph = bytes(puzzle_node.get_tree_hash())
             if len(ph) != 32:
                 return False
-            reveals[ph] = bytes(puzzle)
+            puzzle_bytes = bytes(puzzle_node)
+            reveals[ph] = puzzle_bytes
+
+            # Capture full per-coin data for the announcement walker. If
+            # any individual field can't be coerced we still keep the
+            # puzzle reveal — partial data is more useful than none.
+            try:
+                parent_atom = parent_node.as_atom() or b""
+                amount_atom = amount_node.as_atom() or b""
+                amount = int.from_bytes(amount_atom, "big") if amount_atom else 0
+                solution_bytes = bytes(solution_node)
+                if len(parent_atom) == 32:
+                    spend_data[(parent_atom, ph, amount)] = {
+                        "parent_id": parent_atom,
+                        "puzzle_hash": ph,
+                        "amount": amount,
+                        "puzzle_reveal": puzzle_bytes,
+                        "solution": solution_bytes,
+                    }
+            except Exception:
+                pass
             return True
         except Exception as e:
             last_walk_err = f"{type(e).__name__}: {e}"
@@ -543,10 +587,242 @@ def _extract_puzzle_reveals(
         suffix = f"; last walk error: {last_walk_err}" if last_walk_err else ""
         return (
             {},
+            {},
             f"ran via {shape_used} but extracted 0 reveals ({summary}){suffix}",
         )
 
-    return reveals, f"extracted {len(reveals)} reveals via {shape_used} ({summary})"
+    return (
+        reveals,
+        spend_data,
+        f"extracted {len(reveals)} reveals / {len(spend_data)} spends "
+        f"via {shape_used} ({summary})",
+    )
+
+
+def _parse_announcements(
+    puzzle_bytes: bytes, solution_bytes: bytes
+) -> tuple[dict[str, list[bytes]], str | None]:
+    """Run puzzle(solution) and return the announcement-related conditions:
+
+        {
+          "created_cca_msgs":  list[bytes],  # raw messages (creator coin_id implicit)
+          "asserted_cca_ids":  list[bytes],  # pre-hashed sha256(coin_id || msg)
+          "created_cpa_msgs":  list[bytes],  # raw messages
+          "asserted_cpa_ids":  list[bytes],  # pre-hashed sha256(puzzle_hash || msg)
+        }
+
+    On run failure, returns empty lists plus an error note. Per-condition
+    parse errors are skipped silently — one mis-shaped condition shouldn't
+    drop the rest."""
+    out: dict[str, list[bytes]] = {
+        "created_cca_msgs": [],
+        "asserted_cca_ids": [],
+        "created_cpa_msgs": [],
+        "asserted_cpa_ids": [],
+    }
+    if _PROGRAM_CLS is None:
+        return out, "Program class not importable"
+    try:
+        puzzle = _PROGRAM_CLS.from_bytes(puzzle_bytes)
+        solution = _PROGRAM_CLS.from_bytes(solution_bytes)
+    except Exception as e:
+        return out, f"Program.from_bytes failed: {type(e).__name__}: {e}"
+
+    max_cost = int(getattr(_DEFAULT_CONSTANTS, "MAX_BLOCK_COST_CLVM", 11_000_000_000))
+    conds = None
+    last_err: str | None = None
+    for label, runner in (
+        ("run", lambda: puzzle.run(solution)),
+        ("run_with_cost", lambda: puzzle.run_with_cost(max_cost, solution)[1]),
+    ):
+        try:
+            conds = runner()
+            break
+        except Exception as e:
+            last_err = f"{label}: {type(e).__name__}: {e}"
+            continue
+    if conds is None:
+        return out, last_err or "puzzle.run failed (unknown)"
+
+    try:
+        for cond in conds.as_iter():
+            try:
+                opcode_atom = cond.first().as_atom() or b""
+                opcode = int.from_bytes(opcode_atom, "big") if opcode_atom else 0
+                if opcode not in (
+                    _OP_CREATE_COIN_ANNOUNCEMENT,
+                    _OP_ASSERT_COIN_ANNOUNCEMENT,
+                    _OP_CREATE_PUZZLE_ANNOUNCEMENT,
+                    _OP_ASSERT_PUZZLE_ANNOUNCEMENT,
+                ):
+                    continue
+                arg_atom = cond.rest().first().as_atom()
+                if arg_atom is None:
+                    continue
+                if opcode == _OP_CREATE_COIN_ANNOUNCEMENT:
+                    out["created_cca_msgs"].append(bytes(arg_atom))
+                elif opcode == _OP_ASSERT_COIN_ANNOUNCEMENT:
+                    out["asserted_cca_ids"].append(bytes(arg_atom))
+                elif opcode == _OP_CREATE_PUZZLE_ANNOUNCEMENT:
+                    out["created_cpa_msgs"].append(bytes(arg_atom))
+                elif opcode == _OP_ASSERT_PUZZLE_ANNOUNCEMENT:
+                    out["asserted_cpa_ids"].append(bytes(arg_atom))
+            except Exception:
+                continue
+    except Exception as e:
+        return out, f"conditions walk failed: {type(e).__name__}: {e}"
+
+    return out, None
+
+
+def _walk_announcement_linkages(
+    spends_list: list,
+    spend_data_by_key: dict[tuple[bytes, bytes, int], dict],
+    seed_coin_ids: set[bytes],
+    max_total: int = 100,
+) -> tuple[dict[bytes, dict], str]:
+    """BFS from seed_coin_ids over chia coin/puzzle-announcement edges (60/61
+    and 62/63). A spend is connected to another in the same block iff one
+    creates an announcement the other asserts (in either direction).
+
+    Returns ({extra_coin_id → {edge_note, asset_type/asset_id placeholders}},
+    diagnostic_note). `extra_coin_id` excludes the seeds themselves.
+
+    Capped at `max_total` reached coins (seeds + extras combined) so a
+    pathological block can't blow up. Hitting the cap is reported in the
+    note."""
+    if not spends_list:
+        return {}, "spends_list empty"
+
+    # Per-spend announcement info, keyed by chia_rs `coin_id`. Spends whose
+    # solution we couldn't extract are still registered (as no-announcements
+    # nodes) so they can be reported as "linkage missing" rather than
+    # quietly ignored, but they don't contribute edges.
+    info: dict[bytes, dict] = {}
+    parse_failures: list[str] = []
+    spends_without_solution = 0
+    for sp in spends_list:
+        try:
+            coin_id = bytes(getattr(sp, "coin_id"))
+        except Exception:
+            continue
+        if len(coin_id) != 32:
+            continue
+        try:
+            ph = bytes(getattr(sp, "puzzle_hash"))
+        except Exception:
+            ph = b""
+        try:
+            parent = bytes(getattr(sp, "parent_id"))
+        except Exception:
+            parent = b""
+        amount_raw = getattr(sp, "coin_amount", None)
+        if amount_raw is None:
+            amount_raw = getattr(sp, "amount", None)
+        try:
+            amount = int(amount_raw) if amount_raw is not None else 0
+        except Exception:
+            amount = 0
+
+        details = spend_data_by_key.get((parent, ph, amount))
+        if details is None:
+            info[coin_id] = {
+                "puzzle_hash": ph,
+                "created_cca_ids": set(),
+                "asserted_cca_ids": set(),
+                "created_cpa_ids": set(),
+                "asserted_cpa_ids": set(),
+            }
+            spends_without_solution += 1
+            continue
+
+        parsed, err = _parse_announcements(
+            details["puzzle_reveal"], details["solution"]
+        )
+        if err:
+            parse_failures.append(f"{coin_id.hex()[:12]}…: {err}")
+        info[coin_id] = {
+            "puzzle_hash": ph,
+            "created_cca_ids": {
+                hashlib.sha256(coin_id + msg).digest()
+                for msg in parsed["created_cca_msgs"]
+            },
+            "asserted_cca_ids": set(parsed["asserted_cca_ids"]),
+            "created_cpa_ids": {
+                hashlib.sha256(ph + msg).digest()
+                for msg in parsed["created_cpa_msgs"]
+            },
+            "asserted_cpa_ids": set(parsed["asserted_cpa_ids"]),
+        }
+
+    # Inverse indices: announcement_id → set of coin_ids creating / asserting.
+    cca_created_by: dict[bytes, set[bytes]] = {}
+    cca_asserted_by: dict[bytes, set[bytes]] = {}
+    cpa_created_by: dict[bytes, set[bytes]] = {}
+    cpa_asserted_by: dict[bytes, set[bytes]] = {}
+    for cid, x in info.items():
+        for aid in x["created_cca_ids"]:
+            cca_created_by.setdefault(aid, set()).add(cid)
+        for aid in x["asserted_cca_ids"]:
+            cca_asserted_by.setdefault(aid, set()).add(cid)
+        for aid in x["created_cpa_ids"]:
+            cpa_created_by.setdefault(aid, set()).add(cid)
+        for aid in x["asserted_cpa_ids"]:
+            cpa_asserted_by.setdefault(aid, set()).add(cid)
+
+    # BFS expansion. Edge note records how each new coin entered the set.
+    reached: set[bytes] = set(seed_coin_ids)
+    edges: dict[bytes, str] = {}
+    queue: list[bytes] = [c for c in seed_coin_ids if c in info]
+    truncated = False
+
+    def _add(other: bytes, note: str) -> None:
+        nonlocal truncated
+        if other in reached:
+            return
+        if len(reached) >= max_total:
+            truncated = True
+            return
+        reached.add(other)
+        edges[other] = note
+        queue.append(other)
+
+    while queue and not truncated:
+        cid = queue.pop()
+        x = info.get(cid)
+        if x is None:
+            continue
+        src = cid.hex()[:12] + "…"
+        # This spend creates announcements → other spends that assert them.
+        for aid in x["created_cca_ids"]:
+            for other in cca_asserted_by.get(aid, set()):
+                _add(other, f"asserts coin announcement created by {src}")
+        for aid in x["created_cpa_ids"]:
+            for other in cpa_asserted_by.get(aid, set()):
+                _add(other, f"asserts puzzle announcement created by {src}")
+        # This spend asserts announcements → other spends that created them.
+        for aid in x["asserted_cca_ids"]:
+            for other in cca_created_by.get(aid, set()):
+                _add(other, f"creates coin announcement asserted by {src}")
+        for aid in x["asserted_cpa_ids"]:
+            for other in cpa_created_by.get(aid, set()):
+                _add(other, f"creates puzzle announcement asserted by {src}")
+
+    extras: dict[bytes, dict] = {
+        cid: {"edge_note": edges.get(cid, "(linked via announcement chain)")}
+        for cid in reached
+        if cid not in seed_coin_ids
+    }
+
+    note_parts: list[str] = [
+        f"parsed {len(info)} spend(s)",
+        f"{spends_without_solution} without solution data" if spends_without_solution else "",
+        f"{len(parse_failures)} parse failure(s): " + "; ".join(parse_failures[:2])
+            if parse_failures else "",
+        f"capped at {max_total} reached coins" if truncated else "",
+        f"found {len(extras)} announcement-linked sibling(s)",
+    ]
+    return extras, ", ".join(p for p in note_parts if p)
 
 
 def _load_block(row_bytes: bytes) -> FullBlock:
@@ -806,20 +1082,29 @@ def _process_block(
     # reason) and stamp it on the block-level output so failures show up
     # in Bridge Info without an extra debug flag.
     puzzle_reveals_by_ph: dict[bytes, bytes] = {}
+    spend_data_by_key: dict[tuple[bytes, bytes, int], dict] = {}
     extraction_note: str | None = None
     _reveals_loaded = False
 
     def _ensure_reveals_loaded() -> None:
-        nonlocal puzzle_reveals_by_ph, _reveals_loaded, extraction_note
+        nonlocal puzzle_reveals_by_ph, spend_data_by_key, _reveals_loaded, extraction_note
         if _reveals_loaded:
             return
         _reveals_loaded = True
         try:
-            puzzle_reveals_by_ph, extraction_note = _extract_puzzle_reveals(block, db)
+            puzzle_reveals_by_ph, spend_data_by_key, extraction_note = (
+                _extract_puzzle_reveals(block, db)
+            )
         except Exception as e:
             extraction_note = (
                 f"_extract_puzzle_reveals threw: {type(e).__name__}: {e}"
             )
+
+    # Seed coin_ids drive the announcement-linkage walker — coins matched
+    # directly via puzzle_hash / create_coin_target / create_coin_hint
+    # become the starting set, and the walker pulls in any sibling spend
+    # connected via coin/puzzle announcement edges.
+    seed_coin_ids: set[bytes] = set()
 
     if spends_list is not None:
         for sp in spends_list:
@@ -827,6 +1112,12 @@ def _process_block(
                 m = _match_spend(sp, target_hashes)
                 if m is None:
                     continue
+                try:
+                    seed_cid = bytes(getattr(sp, "coin_id"))
+                    if len(seed_cid) == 32:
+                        seed_coin_ids.add(seed_cid)
+                except Exception:
+                    pass
                 # Enrich with asset classification when we can. Look up
                 # the SPENT coin's puzzle_reveal by puzzle_hash and
                 # uncurry it. For "puzzle_hash" matches the spent coin
@@ -891,6 +1182,89 @@ def _process_block(
                     file=sys.stderr,
                 )
 
+    # Announcement-linkage pass: pull in sibling spends from the same
+    # spend_bundle. Skipped if no seeds matched (nothing to walk from) or
+    # if generator parsing failed (no spends_list to traverse).
+    linkage_note: str | None = None
+    block_spend_count = len(spends_list) if spends_list is not None else None
+    if spends_list and seed_coin_ids:
+        _ensure_reveals_loaded()
+        try:
+            extras, linkage_note = _walk_announcement_linkages(
+                spends_list, spend_data_by_key, seed_coin_ids
+            )
+        except Exception as e:
+            extras = {}
+            linkage_note = f"walker threw: {type(e).__name__}: {e}"
+
+        # Build a coin_id → spend lookup so we can fill in coin info for
+        # the linked siblings. Same defensive bytes() pattern as elsewhere.
+        spends_by_coin_id: dict[bytes, Any] = {}
+        for sp in spends_list:
+            try:
+                cid = bytes(getattr(sp, "coin_id"))
+                if len(cid) == 32:
+                    spends_by_coin_id[cid] = sp
+            except Exception:
+                continue
+
+        target_hex_sorted = sorted(h.hex() for h in target_hashes)
+        for new_cid, link_info in extras.items():
+            sp = spends_by_coin_id.get(new_cid)
+            if sp is None:
+                continue
+            try:
+                spent_ph = bytes(getattr(sp, "puzzle_hash"))
+            except Exception:
+                spent_ph = b""
+            try:
+                parent = bytes(getattr(sp, "parent_id"))
+            except Exception:
+                try:
+                    parent = bytes(getattr(sp, "coin_id"))
+                except Exception:
+                    parent = b""
+            amount_raw = getattr(sp, "coin_amount", None)
+            if amount_raw is None:
+                amount_raw = getattr(sp, "amount", None)
+            try:
+                amount_int = int(amount_raw) if amount_raw is not None else None
+            except Exception:
+                amount_int = None
+
+            m_extra: dict = {
+                # Carry the bridge target through so downstream tooling can
+                # still group by target; the match_reason makes clear this
+                # was reached transitively, not by direct byte match.
+                "matched_hashes": target_hex_sorted,
+                "match_reasons": ["announcement_linked"],
+                "coin": {
+                    "parent_coin_info": "0x" + parent.hex() if parent else None,
+                    "puzzle_hash": "0x" + spent_ph.hex() if spent_ph else None,
+                    "amount": amount_int,
+                },
+                "asset_type": "unknown",
+                "asset_id": None,
+            }
+
+            classification_note = link_info.get("edge_note") or "announcement-linked"
+            if spent_ph:
+                reveal = puzzle_reveals_by_ph.get(spent_ph)
+                if reveal is not None:
+                    new_type, new_id, cl_note = _classify_puzzle(
+                        reveal, target_hashes
+                    )
+                    m_extra["asset_type"] = new_type
+                    m_extra["asset_id"] = new_id
+                    classification_note = f"{classification_note}; {cl_note}"
+                else:
+                    classification_note = (
+                        f"{classification_note}; puzzle reveal not extracted "
+                        f"for puzzle_hash=0x{spent_ph.hex()}"
+                    )
+            m_extra["classification_note"] = classification_note
+            spend_details.append(m_extra)
+
     return {
         "height": height,
         "header_hash": hh_hex,
@@ -899,6 +1273,8 @@ def _process_block(
         "generator_parsed": spends_list is not None,
         "generator_error": gen_err,
         "classification_extraction_note": extraction_note,
+        "announcement_linkage_note": linkage_note,
+        "block_spend_count": block_spend_count,
         "spends": spend_details,
     }
 

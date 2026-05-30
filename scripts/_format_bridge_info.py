@@ -92,6 +92,12 @@ def _emit_detailed(matches):
             print("    Block timestamp: (non-tx block)")
         bm = m.get("byte_matched_hashes") or []
         print(f"    Byte-matched:    {', '.join(bm)}")
+        bsc = m.get("block_spend_count")
+        if bsc is not None:
+            print(f"    Block spends:    {bsc} total")
+        link_note = m.get("announcement_linkage_note")
+        if link_note:
+            print(f"    Linkage walk:    {link_note}")
 
         spends = m.get("spends") or []
         if not m.get("generator_parsed"):
@@ -121,7 +127,16 @@ def _emit_detailed(matches):
             reasons = s.get("match_reasons") or []
             matched_h = s.get("matched_hashes") or []
             print(f"          matched on:  {', '.join(reasons) or '(unknown)'}")
-            print(f"          matched hash:{', '.join(matched_h)}")
+            # For announcement-linked siblings the "matched hash" line is
+            # the bridge target carried transitively, not a direct byte
+            # match — label it so that's unambiguous.
+            if reasons == ["announcement_linked"]:
+                print(
+                    f"          matched hash:{', '.join(matched_h)} "
+                    f"(transitive — bridge target carried via announcement chain)"
+                )
+            else:
+                print(f"          matched hash:{', '.join(matched_h)}")
 
 
 def main() -> int:
