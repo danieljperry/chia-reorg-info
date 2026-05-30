@@ -236,19 +236,73 @@ _EXTRA_TEMPLATES: list[tuple[str, bytes | None]] = [
     ),
 ]
 
-# Warp.green outbound bridge encoder. Identified by observation:
-# 1238 spent canonical-chain coins with the same puzzle_hash all created
-# exactly one CREATE_COIN with the bridge message puzzle hash and memos
-# of the form [chain_tag, dest_address, dest_token_contract, ...]. The
-# outer mod hash is stable across all instances; the destination details
-# vary per spend. Curried args layout (5 args):
-#   [0] CAT_MOD_HASH (constant)
-#   [1] 32-byte nonce / per-asset key
-#   [2] bridge message puzzle hash (= the configured -b target)
-#   [3] destination chain tag (3-byte ASCII, e.g. "bse" for Base)
-#   [4] destination address (20 bytes for ETH-family chains)
-_WARP_OUTBOUND_MOD_HASH = bytes.fromhex(
-    "cf5743483ed4d0f5536a11877f5b15629b04e6bf34943843c5cad97ce61f2505"
+# Warp.green Chia-side puzzle family. Mod hashes computed directly by
+# tree-hashing the compiled .hex files in warpdotgreen/cli/puzzles/. The
+# locker is the only one where the curry layout is worth extracting at
+# uncurry time (it carries the destination chain + contract + asset_id);
+# the others get a name-only label.
+_WARP_PUZZLES: list[tuple[str, bytes]] = [
+    (
+        "warp_bridging_puzzle",
+        bytes.fromhex("a09eb1ea8c6e83c0166801dabcf4a70d361cc7f6d89c4a46bcd400ac57719037"),
+    ),
+    (
+        "warp_message_coin",
+        bytes.fromhex("331e8775ee22bbb793b411071ba6d49739d8d496dff7d9eb059ac787ef7e89fc"),
+    ),
+    (
+        "warp_portal_receiver",
+        bytes.fromhex("6a91ad29cc7d8d16514316d20e154a393faa35d6474cec7c597a15fd017101d9"),
+    ),
+    (
+        "warp_rekey_portal",
+        bytes.fromhex("53536340f3539383988167d3bf98ea6353a6f981a6f9721aa9f6c739e8f88b27"),
+    ),
+    (
+        "warp_cat_burner",
+        bytes.fromhex("cf5743483ed4d0f5536a11877f5b15629b04e6bf34943843c5cad97ce61f2505"),
+    ),
+    (
+        "warp_cat_minter",
+        bytes.fromhex("9e1c1ca30ea296accdbd046b91b40f7907f86e33d41b57102211c48a3f9aa0f1"),
+    ),
+    (
+        "warp_wrapped_tail",
+        bytes.fromhex("2d7e6fd2e8dd27536ebba2cf6b9fde09493fa10037aa64e14b201762c902f013"),
+    ),
+    (
+        "warp_burn_inner_puzzle",
+        bytes.fromhex("69b9ac68db61a9941ff537cbb69158a7e1015ad44c42cff905159909cd8e1f90"),
+    ),
+    (
+        "warp_cat_mint_and_payout",
+        bytes.fromhex("2c78140b52765a1c063062775d31a33a452410e9777c01270c1001db6e821f37"),
+    ),
+    (
+        "warp_unlocker",
+        bytes.fromhex("71dcf765877bd0634f046876a182d04ab0170121032a0d6a83b0573ca1d24d0c"),
+    ),
+    (
+        "warp_p2_controller",
+        bytes.fromhex("a8082b5622ccb27e89f196f024f9851dee0bcb0f2d8afd395caa6d4432f6f85f"),
+    ),
+]
+
+# The locker is the controller of a Chia→EVM outbound bundle (locks a
+# Chia CAT — including wrapped-asset CATs like DWB — and creates the
+# bridge message coin). Verified via warpdotgreen/cli's
+# drivers/wrapped_cats.py::get_locker_puzzle, the 7 curried args are:
+#   [0] MESSAGE_DESTINATION_CHAIN   3-byte ASCII (e.g. b"bse" for Base)
+#   [1] MESSAGE_DESTINATION         32-byte EVM contract hash
+#   [2] CAT_MOD_HASH                constant
+#   [3] OFFER_MOD_HASH              constant (settlement_payments)
+#   [4] BRIDGING_PUZZLE_HASH        constant (= warp_bridging_puzzle)
+#   [5] VAULT_PUZZLE_HASH           p2_controller_puzzle_hash inner
+#   [6] ASSET_ID                    CAT tail hash, or `()` for XCH
+# The wallet receiver address is NOT curried — it comes from the
+# solution, so we can't recover it from the puzzle reveal alone.
+_WARP_LOCKER_MOD_HASH = bytes.fromhex(
+    "69475cd8d5c28407feea9146f932d3b9971256436c7b6ff906d6b4b80d22187e"
 )
 
 
@@ -353,45 +407,60 @@ def _classify_puzzle(
         if extra_hash is not None and mod_hash == extra_hash:
             return label, None, f"mod_hash={mod_short} matches {label}"
 
-    if mod_hash == _WARP_OUTBOUND_MOD_HASH:
-        # Curried args: [CAT_MOD, nonce, bridge_target, chain_tag, dest_addr].
-        # Extract chain + recipient so asset_id renders as e.g.
-        # "bse:0x8412f06e811b858ea9edcf81a5e5882dbf70ac96" — that's all
-        # the routing info a re-org observer needs.
+    if mod_hash == _WARP_LOCKER_MOD_HASH:
+        # warp.green Chia→EVM outbound controller. Pull the destination
+        # chain, destination contract, and asset_id from the 7 curried
+        # args (see _WARP_LOCKER_MOD_HASH comment above for the layout).
+        # The wallet receiver address isn't curried, so we report it as
+        # "(receiver in solution)" in the note for clarity.
         try:
             args_list = list(curried_args.as_iter())
-            if len(args_list) >= 5:
-                chain_atom = bytes(args_list[3].as_atom() or b"")
-                recipient = bytes(args_list[4].as_atom() or b"")
+            if len(args_list) >= 7:
+                chain_atom = bytes(args_list[0].as_atom() or b"")
+                dest_contract = bytes(args_list[1].as_atom() or b"")
+                asset_id_atom = bytes(args_list[6].as_atom() or b"")
                 chain_tag = (
-                    chain_atom.decode("ascii", errors="replace") if chain_atom else "?"
+                    chain_atom.decode("ascii", errors="replace")
+                    if chain_atom else "?"
                 )
-                dest_id = f"{chain_tag}:0x{recipient.hex()}" if recipient else chain_tag
+                asset_label = (
+                    "0x" + asset_id_atom.hex() if len(asset_id_atom) == 32 else "xch"
+                )
+                dest_id = (
+                    f"{chain_tag}:0x{dest_contract.hex()}"
+                    if dest_contract else chain_tag
+                )
                 return (
-                    "warp_outbound",
+                    "warp_locker",
                     dest_id,
-                    f"mod_hash={mod_short} matches warp.green outbound bridge "
-                    f"(destination: {dest_id})",
+                    f"mod_hash={mod_short} matches warp.green locker "
+                    f"(destination: {dest_id}; locking asset: {asset_label}; "
+                    f"receiver in solution)",
                 )
         except Exception as e:
             return (
-                "warp_outbound",
+                "warp_locker",
                 None,
-                f"mod_hash={mod_short} matches warp.green outbound but args parse failed: "
-                f"{type(e).__name__}: {e}",
+                f"mod_hash={mod_short} matches warp.green locker but args parse "
+                f"failed: {type(e).__name__}: {e}",
             )
         return (
-            "warp_outbound",
+            "warp_locker",
             None,
-            f"mod_hash={mod_short} matches warp.green outbound (unexpected arg count)",
+            f"mod_hash={mod_short} matches warp.green locker (unexpected arg count)",
         )
+
+    # Other warp.green puzzles: name-only label, no extracted asset_id.
+    for label, warp_hash in _WARP_PUZZLES:
+        if mod_hash == warp_hash:
+            return label, None, f"mod_hash={mod_short} matches {label}"
 
     # No template matched. Surface the FULL mod_hash so the user can
     # identify it externally (lookup against known protocols, ask the
     # wallet that produced the coin, etc.) and consider adding it to
-    # _EXTRA_TEMPLATES. asset_id carries the mod_hash so it shows up in
-    # the formatter under "asset_id: 0x..." rather than getting hidden
-    # in the note.
+    # _EXTRA_TEMPLATES or _WARP_PUZZLES. asset_id carries the mod_hash
+    # so it shows up in the formatter under "asset_id: 0x..." rather
+    # than getting hidden in the note.
     builtin_templates = [
         ("p2", _STANDARD_MOD_HASH),
         ("cat", _CAT_MOD_HASH),
@@ -400,6 +469,7 @@ def _classify_puzzle(
     loaded = [
         lab for lab, h in (builtin_templates + _EXTRA_TEMPLATES) if h is not None
     ]
+    loaded.extend(["warp_locker"] + [lab for lab, _ in _WARP_PUZZLES])
     loaded_str = ",".join(loaded) if loaded else "none"
     full_hex = "0x" + mod_hash.hex()
     return (
