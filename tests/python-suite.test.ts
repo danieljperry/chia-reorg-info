@@ -56,7 +56,10 @@ describe('Python unittest suite (scripts/_decode_bridge_spends.py)', () => {
       // unittest writes to stderr by default and decorates "OK" with ANSI
       // color when stderr is a TTY-ish stream — strip ANSI so the
       // assertion regexes don't get tripped up by the escape sequences.
-      const combined = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, '');
+      // Build the regex from a string so the literal ESC byte (0x1b)
+      // doesn't trigger ESLint's no-control-regex rule.
+      const ansi = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
+      const combined = (r.stdout + r.stderr).replace(ansi, '');
       expect(combined).toMatch(/\bOK\b/);
       expect(combined).toMatch(new RegExp(`Ran ${expectedTestCount} tests`));
     });
