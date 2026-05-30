@@ -825,6 +825,43 @@ def _walk_announcement_linkages(
             "asserted_cpa_ids": set(parsed["asserted_cpa_ids"]),
         }
 
+    extras, truncated = _bfs_announcement_graph(info, seed_coin_ids, max_total)
+
+    note_parts: list[str] = [
+        f"parsed {len(info)} spend(s)",
+        f"{spends_without_solution} without solution data" if spends_without_solution else "",
+        f"{len(parse_failures)} parse failure(s): " + "; ".join(parse_failures[:2])
+            if parse_failures else "",
+        f"capped at {max_total} reached coins" if truncated else "",
+        f"found {len(extras)} announcement-linked sibling(s)",
+    ]
+    return extras, ", ".join(p for p in note_parts if p)
+
+
+def _bfs_announcement_graph(
+    info: dict[bytes, dict],
+    seed_coin_ids: set[bytes],
+    max_total: int = 100,
+) -> tuple[dict[bytes, dict], bool]:
+    """Pure BFS over the per-spend announcement-edge graph. No chia/chia_rs
+    dependency — extracted from `_walk_announcement_linkages` so it can be
+    unit-tested in isolation with synthetic input.
+
+    Input shape — `info[coin_id]` must be a dict with these keys:
+        - "puzzle_hash":        bytes (informational; not used by BFS)
+        - "created_cca_ids":    set[bytes], each = sha256(coin_id || msg)
+        - "asserted_cca_ids":   set[bytes], pre-hashed assertion IDs
+        - "created_cpa_ids":    set[bytes], each = sha256(puzzle_hash || msg)
+        - "asserted_cpa_ids":   set[bytes], pre-hashed assertion IDs
+
+    Returns ({extra_coin_id: {edge_note: str}}, truncated_flag). `extras`
+    excludes the seeds themselves. `truncated` is True iff BFS hit
+    `max_total` reached coins (seeds + extras) and stopped early.
+
+    Edge direction is symmetric: an announcement_id present in one
+    spend's `created_*` set AND another spend's `asserted_*` set induces
+    an undirected edge between those two coin_ids; BFS traverses both
+    ways from each seed."""
     # Inverse indices: announcement_id → set of coin_ids creating / asserting.
     cca_created_by: dict[bytes, set[bytes]] = {}
     cca_asserted_by: dict[bytes, set[bytes]] = {}
@@ -840,7 +877,6 @@ def _walk_announcement_linkages(
         for aid in x["asserted_cpa_ids"]:
             cpa_asserted_by.setdefault(aid, set()).add(cid)
 
-    # BFS expansion. Edge note records how each new coin entered the set.
     reached: set[bytes] = set(seed_coin_ids)
     edges: dict[bytes, str] = {}
     queue: list[bytes] = [c for c in seed_coin_ids if c in info]
@@ -883,16 +919,7 @@ def _walk_announcement_linkages(
         for cid in reached
         if cid not in seed_coin_ids
     }
-
-    note_parts: list[str] = [
-        f"parsed {len(info)} spend(s)",
-        f"{spends_without_solution} without solution data" if spends_without_solution else "",
-        f"{len(parse_failures)} parse failure(s): " + "; ".join(parse_failures[:2])
-            if parse_failures else "",
-        f"capped at {max_total} reached coins" if truncated else "",
-        f"found {len(extras)} announcement-linked sibling(s)",
-    ]
-    return extras, ", ".join(p for p in note_parts if p)
+    return extras, truncated
 
 
 def _load_block(row_bytes: bytes) -> FullBlock:
