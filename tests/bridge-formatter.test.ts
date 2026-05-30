@@ -244,14 +244,20 @@ describe('_format_bridge_info.py', () => {
     expect(r.stdout).not.toMatch(/asset_id/);
   });
 
-  it('detailed: warp_outbound renders with chain:address destination in asset_id', () => {
-    const dest = 'bse:0x8412f06e811b858ea9edcf81a5e5882dbf70ac96';
+  it('detailed: warp_locker renders with chain:contract destination in asset_id', () => {
+    // The locker classifier emits asset_id as "<chain_tag>:0x<dest_contract>"
+    // — extracted from the 7-arg curry layout. We verify the formatter
+    // surfaces both that and the classification note's destination /
+    // locking-asset / receiver-in-solution wording.
+    const dest = 'bse:0xc65151ac284f43a51f0a843f6a46930eff0076c5';
+    const lockedAsset =
+      '0xb0495abe70851d43d8444f785daa4fb2aaa8dae6312d596ee318d2b5834cc987';
     const payload = {
       matches: [
         {
-          height: 8682028,
+          height: 7357253,
           header_hash: '20'.repeat(32),
-          timestamp: 1777965346,
+          timestamp: 1753099325,
           byte_matched_hashes: ['a09eb1ea'],
           generator_parsed: true,
           generator_error: null,
@@ -259,10 +265,12 @@ describe('_format_bridge_info.py', () => {
             {
               matched_hashes: ['a09eb1ea'],
               match_reasons: ['create_coin_target'],
-              coin: { parent_coin_info: '0xca07', puzzle_hash: '0x6d64', amount: 1000000000 },
-              asset_type: 'warp_outbound',
+              coin: { parent_coin_info: '0x35ef', puzzle_hash: '0xc94e', amount: 1000000000 },
+              asset_type: 'warp_locker',
               asset_id: dest,
-              classification_note: `mod_hash=cf57434…; matches warp.green outbound bridge (destination: ${dest})`,
+              classification_note:
+                `mod_hash=69475cd8d5c2… matches warp.green locker ` +
+                `(destination: ${dest}; locking asset: ${lockedAsset}; receiver in solution)`,
             },
           ],
         },
@@ -271,9 +279,148 @@ describe('_format_bridge_info.py', () => {
     const r = run('detailed', JSON.stringify(payload));
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(
-      new RegExp(`asset: {7}warp_outbound \\(asset_id: ${dest.replace(/:/g, ':')}\\)`)
+      new RegExp(`asset: {7}warp_locker \\(asset_id: ${dest.replace(/:/g, ':')}\\)`)
     );
-    expect(r.stdout).toMatch(/matches warp\.green outbound bridge/);
+    expect(r.stdout).toMatch(/matches warp\.green locker/);
+    expect(r.stdout).toMatch(/locking asset: 0xb0495abe/);
+    expect(r.stdout).toMatch(/receiver in solution/);
+  });
+
+  it('detailed: block_spend_count prints "Block spends: N total" when present', () => {
+    const payload = {
+      matches: [
+        {
+          height: 7357253,
+          header_hash: 'ee'.repeat(32),
+          timestamp: 1753099325,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          block_spend_count: 38,
+          spends: [],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Block spends: {4}38 total/);
+  });
+
+  it('detailed: block_spend_count line is omitted when the field is absent', () => {
+    // Backward-compat: older helper output without block_spend_count
+    // shouldn't render an empty "Block spends:" line.
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/Block spends:/);
+  });
+
+  it('detailed: announcement_linkage_note renders under "Linkage walk:"', () => {
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          announcement_linkage_note:
+            'parsed 38 spend(s), found 2 announcement-linked sibling(s)',
+          spends: [],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(
+      /Linkage walk: {4}parsed 38 spend\(s\), found 2 announcement-linked sibling\(s\)/
+    );
+  });
+
+  it('detailed: announcement_linked match labels "matched hash:" as transitive', () => {
+    // When a spend was pulled in by the announcement walker (rather than
+    // matched directly by puzzle_hash / create_coin_target / hint), the
+    // "matched hash:" line should carry a parenthetical noting that the
+    // hash is transitive — otherwise a reader could mistake an
+    // announcement-linked sibling for a direct byte-match.
+    const payload = {
+      matches: [
+        {
+          height: 7357253,
+          header_hash: 'ee'.repeat(32),
+          timestamp: 1753099325,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: [
+                'a09eb1ea8c6e83c0166801dabcf4a70d361cc7f6d89c4a46bcd400ac57719037',
+              ],
+              match_reasons: ['announcement_linked'],
+              coin: {
+                parent_coin_info: '0x0f1d',
+                puzzle_hash: '0xdf7a',
+                amount: 1000000000,
+              },
+              asset_type: 'xch',
+              asset_id: null,
+              classification_note:
+                'asserts coin announcement created by 30b15c4e9f17…; matches p2_delegated → xch',
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/matched on: {2}announcement_linked/);
+    expect(r.stdout).toMatch(
+      /matched hash:a09eb1ea.* \(transitive — bridge target carried via announcement chain\)/
+    );
+  });
+
+  it('detailed: non-announcement_linked match keeps the plain "matched hash:" line', () => {
+    // Mirror of the announcement-linked test above — direct matches
+    // (puzzle_hash, create_coin_target, create_coin_hint) must NOT carry
+    // the transitive suffix.
+    const payload = {
+      matches: [
+        {
+          height: 100,
+          header_hash: 'aa'.repeat(32),
+          timestamp: 1700000000,
+          byte_matched_hashes: ['a09eb1ea'],
+          generator_parsed: true,
+          generator_error: null,
+          spends: [
+            {
+              matched_hashes: ['a09eb1ea'],
+              match_reasons: ['create_coin_target'],
+              coin: { parent_coin_info: '0xpp', puzzle_hash: '0xqq', amount: 1000 },
+              asset_type: 'unknown',
+              asset_id: null,
+            },
+          ],
+        },
+      ],
+    };
+    const r = run('detailed', JSON.stringify(payload));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/transitive — bridge target/);
   });
 
   it('detailed: unknown_curried renders with mod_hash in asset_id slot', () => {

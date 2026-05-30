@@ -141,6 +141,75 @@ $ scripts/reorg-finder.sh -n 10 --json --peak-from db | jq .
 
 `--json` is incompatible with `-q` / `-qq`. All existing flags continue to work unchanged in text mode.
 
+#### Detect bridge transfers in re-orged blocks (`-b` / `--bridge`)
+
+Re-orgs that contain cross-chain bridge transfers are operationally interesting: a bridge transaction that the originating chain reverts (but a relayer already attested to) can produce a duplicate mint on the destination chain. `-b` makes `reorg-finder.sh` scan every orphan/reorged block in its result set for spends related to a configured set of puzzle hashes, and emits a "Bridge Info" section.
+
+**Default search set:** the [Warp.green](https://warp.green) `bridging_puzzle.clsp` message-coin puzzle hash (`a09eb1ea…57719037`). To search for additional targets, append entries to `BRIDGE_HASHES` near the top of `main()` in `scripts/reorg-finder.sh`.
+
+**How matches are found.** A block is included in the Bridge Info section if any configured target hash appears verbatim in its bytes. For each such block, the helper runs the block's `transactions_generator` and reports every spend that matches the bridge in one of four ways:
+
+- `puzzle_hash` — the spent coin **is** the bridge target (the bridge message coin being relayed).
+- `create_coin_target` — the spent coin **creates** a coin at the bridge target (its source — typically a `locker` or `cat_burner`).
+- `create_coin_hint` — the spent coin emits a `CREATE_COIN` whose first memo equals the bridge target.
+- `announcement_linked` — the spent coin is in the same `spend_bundle` as a direct match, reached by BFS over chia announcement conditions (opcodes 60/61 coin announcements and 62/63 puzzle announcements, in both directions). This is what surfaces the actual asset transfer and bridge fee — neither of which references the bridge target literally — alongside the controller and message coin.
+
+**Sample output** (Chia → Base bridge of 500,000 DWB, re-orged):
+
+```bash
+$ scripts/reorg-finder.sh -e 7357300 -n 100 -b
+…
+Bridge Info:
+  Found 1 reorged block(s) with bridge references (4 matching coin spend(s)).
+
+  Match 1:
+    Block height:    7357253
+    Block hash:      ee1b143321c63a67213ab54532d925c8133a94d276ba926754bbb91a72e1d413
+    Block timestamp: 2025-07-21 20:02:05 HKT (unix 1753099325)
+    Byte-matched:    a09eb1ea8c6e83c0166801dabcf4a70d361cc7f6d89c4a46bcd400ac57719037
+    Block spends:    38 total
+    Linkage walk:    parsed 38 spend(s), found 2 announcement-linked sibling(s)
+    Matching spends (4):
+      [1] parent_coin: 0x30b15c4e…
+          puzzle_hash: 0xa09eb1ea8c6e83c0166801dabcf4a70d361cc7f6d89c4a46bcd400ac57719037
+          amount:      1000000000
+          asset:       bridge
+          matched on:  puzzle_hash
+      [2] parent_coin: 0x35efbc40…
+          puzzle_hash: 0xc94ebced…
+          amount:      1000000000
+          asset:       warp_locker (asset_id: bse:0xc65151ac284f43a51f0a843f6a46930eff0076c5)
+          note:        ... matches warp.green locker (destination: bse:0x…; locking asset: 0xb0495abe…; receiver in solution)
+          matched on:  create_coin_target
+      [3] parent_coin: 0x0f1daba3…
+          puzzle_hash: 0xdf7a35c9…
+          amount:      1000000000          ← 0.001 XCH bridge fee
+          asset:       xch
+          matched on:  announcement_linked
+      [4] parent_coin: 0x352c0c2c…
+          puzzle_hash: 0xcd4721b8…
+          amount:      500000000           ← 500,000 DWB (CAT at 3-decimal scale)
+          asset:       cat (asset_id: 0xb0495abe…)
+          matched on:  announcement_linked
+```
+
+**Recognized warp.green puzzles.** Coins whose uncurried mod hash matches one of the warp.green Chia-side puzzles render with a labeled `asset` instead of `unknown_curried`:
+
+| Label | Source |
+|---|---|
+| `warp_locker` | [`wrapped_cats/locker.clsp`](https://github.com/warpdotgreen/cli/blob/master/puzzles/wrapped_cats/locker.clsp) — Chia→EVM outbound controller. The classifier extracts the destination chain, destination contract hash, and locked asset_id from its curried args. |
+| `warp_unlocker` | [`wrapped_cats/unlocker.clsp`](https://github.com/warpdotgreen/cli/blob/master/puzzles/wrapped_cats/unlocker.clsp) |
+| `warp_cat_burner`, `warp_cat_minter`, `warp_wrapped_tail`, `warp_burn_inner_puzzle`, `warp_cat_mint_and_payout` | [`wrapped_assets/*.clsp`](https://github.com/warpdotgreen/cli/tree/master/puzzles/wrapped_assets) — used in the EVM→Chia direction (mint/burn of wrapped assets like DWB, WUSDC.B, milliETH). |
+| `warp_bridging_puzzle`, `warp_message_coin`, `warp_portal_receiver`, `warp_rekey_portal`, `warp_p2_controller` | [`message_coin/*.clsp`](https://github.com/warpdotgreen/cli/tree/master/puzzles/message_coin) and `wrapped_cats/p2_controller_puzzle_hash.clsp` |
+
+**Verbosity:**
+
+- default (no `-q`, no `-qq`): full per-match detail as shown above.
+- `-q`: one line per matching spend (height, timestamp, amount, asset).
+- `-qq`: same as default within the Bridge Info section — `-qq`'s usual job (suppress per-re-org detail) doesn't apply here since Bridge Info is the only useful output.
+
+**Requirements.** Full classification (amounts, asset type, locker destination) requires `chia-blockchain` and `chia_rs` to be importable by `$CHIA_PYTHON` so the block's `transactions_generator` can be parsed. When unavailable, the helper falls back to byte-search-only output (which blocks contained the target hash, no amounts or asset info).
+
 ---
 
 ## Reorg Monitor — as a CLI on Linux
