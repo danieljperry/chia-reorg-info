@@ -86,19 +86,19 @@ describe('cli monitor parseArgs', () => {
 
   it('parses --recipient with default min_blocks', () => {
     const a = parseArgs(['--recipient', 'alice@example.com']);
-    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 1 }]);
+    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 1, bridge: false }]);
   });
 
   it('parses --recipient with explicit min_blocks', () => {
     const a = parseArgs(['--recipient', 'alice@example.com:3']);
-    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 3 }]);
+    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 3, bridge: false }]);
   });
 
   it('collects multiple --recipient flags', () => {
     const a = parseArgs(['--recipient', 'alice@example.com:1', '--recipient', 'bob@example.com:5']);
     expect(a.recipients).toEqual([
-      { email: 'alice@example.com', min_blocks: 1 },
-      { email: 'bob@example.com', min_blocks: 5 },
+      { email: 'alice@example.com', min_blocks: 1, bridge: false },
+      { email: 'bob@example.com', min_blocks: 5, bridge: false },
     ]);
   });
 
@@ -109,7 +109,7 @@ describe('cli monitor parseArgs', () => {
       '--recipient',
       'alice@example.com:9',
     ]);
-    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 1 }]);
+    expect(a.recipients).toEqual([{ email: 'alice@example.com', min_blocks: 1, bridge: false }]);
   });
 
   it('rejects more than 10 recipients', () => {
@@ -133,5 +133,79 @@ describe('cli monitor parseArgs', () => {
   it('throws HelpRequested for --help and -h', () => {
     expect(() => parseArgs(['--help'])).toThrow(HelpRequested);
     expect(() => parseArgs(['-h'])).toThrow(HelpRequested);
+  });
+
+  it('parses :b as a bridge-only subscription (min_blocks null)', () => {
+    const a = parseArgs(['--recipient', 'alice@example.com:b']);
+    expect(a.recipients).toEqual([
+      { email: 'alice@example.com', min_blocks: null, bridge: true },
+    ]);
+  });
+
+  it('merges a numeric entry and a :b entry for the same email (numeric first)', () => {
+    const a = parseArgs([
+      '--recipient',
+      'alice@example.com:2',
+      '--recipient',
+      'alice@example.com:b',
+    ]);
+    expect(a.recipients).toEqual([
+      { email: 'alice@example.com', min_blocks: 2, bridge: true },
+    ]);
+  });
+
+  it('merges regardless of order (:b first, then numeric)', () => {
+    const a = parseArgs([
+      '--recipient',
+      'alice@example.com:b',
+      '--recipient',
+      'alice@example.com:4',
+    ]);
+    expect(a.recipients).toEqual([
+      { email: 'alice@example.com', min_blocks: 4, bridge: true },
+    ]);
+  });
+
+  it('collapses duplicate :b entries for the same email', () => {
+    const a = parseArgs([
+      '--recipient',
+      'alice@example.com:b',
+      '--recipient',
+      'alice@example.com:b',
+    ]);
+    expect(a.recipients).toEqual([
+      { email: 'alice@example.com', min_blocks: null, bridge: true },
+    ]);
+  });
+
+  it('keeps the first numeric when two numerics merge, preserving the bridge flag', () => {
+    const a = parseArgs([
+      '--recipient',
+      'alice@example.com:b',
+      '--recipient',
+      'alice@example.com:2',
+      '--recipient',
+      'alice@example.com:9',
+    ]);
+    expect(a.recipients).toEqual([
+      { email: 'alice@example.com', min_blocks: 2, bridge: true },
+    ]);
+  });
+
+  it('rejects a spec with more than one colon part (e.g. :2:b)', () => {
+    expect(() => parseArgs(['--recipient', 'alice@example.com:2:b'])).toThrow(
+      /--recipient expects/
+    );
+  });
+
+  it('counts merged records once against the 10-recipient cap', () => {
+    const argv = [
+      ...Array.from({ length: 10 }, (_, i) => ['--recipient', `u${i}@e.com`]).flat(),
+      '--recipient',
+      'u0@e.com:b',
+    ];
+    const a = parseArgs(argv);
+    expect(a.recipients).toHaveLength(10);
+    expect(a.recipients[0]).toEqual({ email: 'u0@e.com', min_blocks: 1, bridge: true });
   });
 });

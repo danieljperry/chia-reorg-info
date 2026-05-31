@@ -246,8 +246,13 @@ Options:
   --db-path <path>                Path to blockchain_v2_mainnet.sqlite
                                   (default: $CHIA_DB or ~/.chia/mainnet/db/…)
   --status-every <seconds>        How often to log a status snapshot (default: 60)
-  --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.
-                                  min_blocks defaults to 1. Duplicates collapsed.
+  --recipient <email[:min_blocks|:b]>  Email recipient; repeatable, max 10.
+                                  min_blocks (positive integer, default 1) alerts
+                                  on re-orgs at least that deep. ':b' alerts only
+                                  when a re-org involves the bridge (any depth).
+                                  One address may use both (e.g. ':2' and ':b');
+                                  they merge into one subscription. Duplicates
+                                  collapsed.
   --log-file <path>               Log file path (default: ~/logs/reorg_monitor.log)
   --no-log-file                   Disable file logging (stderr only)
   --smtp-env-file <path>          Load SMTP_* env vars from a KEY=VALUE file.
@@ -256,7 +261,7 @@ Options:
   --help, -h                      Show this help
 ```
 
-Example (Coinset only — the default): monitor mainnet, log to a custom path, alert two addresses (one at any re-org depth, one only for ≥3-block re-orgs), loading SMTP credentials from a dotenv file:
+Example (Coinset only — the default): monitor mainnet, log to a custom path, alert three addresses — one at any re-org depth, one only for ≥3-block re-orgs, and one only when a re-org involves the bridge (`:b`) — loading SMTP credentials from a dotenv file:
 
 ```bash
 node dist/index.js reorg_monitor \
@@ -264,9 +269,12 @@ node dist/index.js reorg_monitor \
   --poll-interval 5 \
   --recipient oncall@example.com:1 \
   --recipient ops-lead@example.com:3 \
+  --recipient bridge-watch@example.com:b \
   --smtp-env-file ~/.config/chia-reorg-info.env \
   --log-file ~/logs/reorg_monitor.log
 ```
+
+A recipient subscribed with `:b` is emailed **only** when a re-org involves a bridge transfer (at any depth), and never for non-bridge re-orgs. An address can combine both forms — e.g. `--recipient me@example.com:2 --recipient me@example.com:b` — to get depth-≥2 alerts *and* bridge alerts; when a single re-org satisfies both, one combined email is sent carrying a `— bridge transfer` subject suffix. Numeric recipients continue to receive bridge details appended to their normal alerts when relevant.
 
 Example (local DB only — no Coinset traffic, uses your full-node DB):
 
@@ -448,7 +456,7 @@ Shell-exported variables take precedence over the file, so you can override one-
 
 When a re-org is detected, the monitor sends one email per eligible recipient. The subject is `Re-org of depth N detected on Chia mainnet` (or `Re-org of depth N-M ...` when the depth is a lower bound because polls were skipped during chain instability). The body lists each affected block: height, old header hash, new header hash, depth, distance from the current peak, and the original block record JSON, plus a link to spacescan.io for the canonical replacement.
 
-A "Skipping recipient (threshold not met)" line is logged when a re-org is too shallow for a given recipient's `min_blocks` threshold. Worst-case dispatch is used — if depth is ambiguous (chain advanced past the last fully-observed peak during the re-org window), the upper-bound depth is what's compared against the threshold so you are never silently filtered out.
+A "Skipping recipient (no trigger met)" line is logged when a re-org matches none of a recipient's triggers — too shallow for their `min_blocks` threshold, and (for `:b` recipients) not involving the bridge. Worst-case dispatch is used — if depth is ambiguous (chain advanced past the last fully-observed peak during the re-org window), the upper-bound depth is what's compared against the threshold so you are never silently filtered out. Bridge-subscribed (`:b`) recipients are dispatched whenever the re-org batch involves a bridge transfer, regardless of depth, and their email carries the complete re-org contents plus a `— bridge transfer` subject suffix.
 
 ## Development
 

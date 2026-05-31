@@ -295,7 +295,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
 
     // Prime observations in session 1.
@@ -371,7 +371,7 @@ describe('reorg monitor detection logic', () => {
         poll_interval_seconds: 60,
         lookback_blocks: 3,
         network: 'mainnet',
-        alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+        alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
       });
       stopMonitor();
 
@@ -413,7 +413,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -465,7 +465,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -494,7 +494,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'strict@example.com', min_blocks: 3 }],
+      alert_recipients: [{ email: 'strict@example.com', min_blocks: 3, bridge: false }],
     });
     stopMonitor();
 
@@ -525,7 +525,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 4,
       network: 'mainnet',
-      alert_recipients: [{ email: 'strict@example.com', min_blocks: 3 }],
+      alert_recipients: [{ email: 'strict@example.com', min_blocks: 3, bridge: false }],
     });
     stopMonitor();
 
@@ -717,12 +717,12 @@ describe('reorg monitor detection logic', () => {
         lookback_blocks: 5,
         network: 'mainnet',
         alert_recipients: [
-          { email: 'r1@example.com', min_blocks: 1 }, // should alert (1 ≤ 4)
-          { email: 'r2@example.com', min_blocks: 2 }, // should alert (2 ≤ 4)
-          { email: 'r3@example.com', min_blocks: 3 }, // should alert (3 ≤ 4)
-          { email: 'r4@example.com', min_blocks: 4 }, // should alert (4 ≤ 4)
-          { email: 'r5@example.com', min_blocks: 5 }, // should NOT alert (5 > 4)
-          { email: 'r6@example.com', min_blocks: 8 }, // should NOT alert (8 > 4)
+          { email: 'r1@example.com', min_blocks: 1, bridge: false }, // should alert (1 ≤ 4)
+          { email: 'r2@example.com', min_blocks: 2, bridge: false }, // should alert (2 ≤ 4)
+          { email: 'r3@example.com', min_blocks: 3, bridge: false }, // should alert (3 ≤ 4)
+          { email: 'r4@example.com', min_blocks: 4, bridge: false }, // should alert (4 ≤ 4)
+          { email: 'r5@example.com', min_blocks: 5, bridge: false }, // should NOT alert (5 > 4)
+          { email: 'r6@example.com', min_blocks: 8, bridge: false }, // should NOT alert (8 > 4)
         ],
       });
       stopMonitor();
@@ -840,8 +840,8 @@ describe('reorg monitor detection logic', () => {
       lookback_blocks: 3,
       network: 'mainnet',
       alert_recipients: [
-        { email: 'low@example.com', min_blocks: 1 },
-        { email: 'high@example.com', min_blocks: 3 },
+        { email: 'low@example.com', min_blocks: 1, bridge: false },
+        { email: 'high@example.com', min_blocks: 3, bridge: false },
       ],
     });
     stopMonitor();
@@ -873,7 +873,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 4,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -915,7 +915,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 5,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -953,7 +953,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 4,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -992,7 +992,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1105,7 +1105,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1136,7 +1136,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 5,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1176,7 +1176,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1203,7 +1203,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1230,7 +1230,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1251,9 +1251,9 @@ describe('reorg monitor detection logic', () => {
 
   // Three-recipient tests: no-min-specified (defaults to 1), explicit min-1, explicit min-3.
   const THREE_RECIPIENTS = [
-    { email: 'none@example.com', min_blocks: 1 }, // represents the tool default when min_blocks is omitted
-    { email: 'min1@example.com', min_blocks: 1 },
-    { email: 'min3@example.com', min_blocks: 3 },
+    { email: 'none@example.com', min_blocks: 1, bridge: false }, // represents the tool default when min_blocks is omitted
+    { email: 'min1@example.com', min_blocks: 1, bridge: false },
+    { email: 'min3@example.com', min_blocks: 3, bridge: false },
   ];
 
   it('three recipients — no reorg → no emails sent', async () => {
@@ -1466,7 +1466,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'testnet11',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
     expect(getStatus().network).toBe('testnet11');
@@ -1495,7 +1495,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'a@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'a@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1533,7 +1533,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1562,16 +1562,16 @@ describe('reorg monitor detection logic', () => {
       lookback_blocks: 2,
       network: 'mainnet',
       alert_recipients: [
-        { email: 'secret.user@example.com', min_blocks: 1 },
-        { email: 'b@x.io', min_blocks: 5 },
+        { email: 'secret.user@example.com', min_blocks: 1, bridge: false },
+        { email: 'b@x.io', min_blocks: 5, bridge: false },
       ],
     });
     stopMonitor();
 
     const status = getStatus();
     expect(status.alert_recipients).toEqual([
-      { email: 's***@example.com', min_blocks: 1 },
-      { email: 'b***@x.io', min_blocks: 5 },
+      { email: 's***@example.com', min_blocks: 1, bridge: false },
+      { email: 'b***@x.io', min_blocks: 5, bridge: false },
     ]);
     expect(JSON.stringify(status)).not.toContain('secret.user');
   });
@@ -1586,7 +1586,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 10,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1634,7 +1634,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1656,7 +1656,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
@@ -1686,7 +1686,7 @@ describe('reorg monitor detection logic', () => {
         poll_interval_seconds: 60,
         lookback_blocks: 2,
         network: 'mainnet',
-        alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+        alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
       });
       stopMonitor();
 
@@ -1719,7 +1719,7 @@ describe('reorg monitor detection logic', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'user@example.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'user@example.com', min_blocks: 1, bridge: false }],
     });
     stopMonitor();
 
