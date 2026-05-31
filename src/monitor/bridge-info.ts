@@ -78,7 +78,19 @@ export async function searchBridges(opts: SearchOptions): Promise<SearchOutcome>
   const chiaPython = opts.chiaPython ?? resolveChiaPython();
   const helper = opts.helperPath ?? DEFAULT_HELPER_PATH;
   const formatter = opts.formatterPath ?? DEFAULT_FORMATTER_PATH;
-  const targets = (opts.bridgeTargets ?? [BRIDGING_PUZZLE_HASH]).join(',');
+  // Gate target hashes through the same 64-char-hex filter as the orphan
+  // header hashes before they reach the subprocess argv. The default is
+  // already canonical, but a caller-supplied bridgeTargets list is not
+  // trusted: strip any 0x prefix and drop anything that isn't a clean
+  // 32-byte hex hash. If nothing valid survives, skip rather than hand the
+  // helper an empty/garbage target list.
+  const validTargets = (opts.bridgeTargets ?? [BRIDGING_PUZZLE_HASH])
+    .map(stripHexPrefix)
+    .filter(isValidHash);
+  if (validTargets.length === 0) {
+    return { kind: 'skipped', reason: 'no valid bridge target hashes supplied' };
+  }
+  const targets = validTargets.join(',');
   const stdin = opts.orphans
     .map((o) => `${o.height}\t${o.header_hash}`)
     .join('\n');

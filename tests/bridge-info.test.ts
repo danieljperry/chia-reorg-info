@@ -165,6 +165,34 @@ describe('searchBridges', () => {
     expect(r.error).toMatch(/simulated formatter failure/);
   });
 
+  it('skips when every supplied bridge target is invalid hex', async () => {
+    const r = await searchBridges({
+      dbPath,
+      chiaPython: PY,
+      helperPath: join(FIXTURES, 'decode_matches.py'),
+      formatterPath: join(FIXTURES, 'format_ok.py'),
+      orphans: [{ height: 1, header_hash: HEADER_HASH }],
+      bridgeTargets: ['not-hex', 'zz', '', 'a'.repeat(63)],
+    });
+    expect(r.kind).toBe('skipped');
+    if (r.kind !== 'skipped') return;
+    expect(r.reason).toMatch(/no valid bridge target hashes/);
+  });
+
+  it('accepts a 0x-prefixed bridge target (strips prefix before validating)', async () => {
+    const r = await searchBridges({
+      dbPath,
+      chiaPython: PY,
+      helperPath: join(FIXTURES, 'decode_matches.py'),
+      formatterPath: join(FIXTURES, 'format_ok.py'),
+      orphans: [{ height: 1, header_hash: HEADER_HASH }],
+      bridgeTargets: ['0x' + BRIDGE_TARGET],
+    });
+    // A valid (prefixed) target survives the gate, so the search runs and the
+    // decode_matches fixture reports a match rather than skipping.
+    expect(r.kind).toBe('matches');
+  });
+
   it('uses default BRIDGING_PUZZLE_HASH when bridgeTargets omitted (passes-through to helper)', async () => {
     // The decode_matches fixture echoes the targets list into the
     // _test_diagnostics block. Run with no `bridgeTargets` to confirm
