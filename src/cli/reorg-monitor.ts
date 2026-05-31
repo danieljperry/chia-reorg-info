@@ -88,14 +88,27 @@ function parseIntegerFlag(name: string, raw: string, min: number, max: number): 
   return n;
 }
 
-function parseRecipient(raw: string): AlertRecipient {
-  const [email, minStr] = raw.split(':');
+/** One parsed `--recipient` token: either a numeric depth subscription or a
+ *  bridge subscription. parseArgs merges these by email into AlertRecipient. */
+type RecipientEntry =
+  | { email: string; kind: 'depth'; min_blocks: number }
+  | { email: string; kind: 'bridge' };
+
+function parseRecipient(raw: string): RecipientEntry {
+  const parts = raw.split(':');
+  const email = parts[0];
   if (email === undefined || !email.includes('@')) {
-    throw new Error(`--recipient expects email[:min_blocks], got "${raw}"`);
+    throw new Error(`--recipient expects email[:min_blocks|:b], got "${raw}"`);
   }
-  const min_blocks =
-    minStr === undefined ? 1 : parseIntegerFlag('min_blocks', minStr, 1, 1_000_000);
-  return { email, min_blocks };
+  if (parts.length > 2) {
+    throw new Error(`--recipient expects email[:min_blocks|:b], got "${raw}"`);
+  }
+  const spec = parts[1];
+  if (spec === undefined) return { email, kind: 'depth', min_blocks: 1 };
+  if (spec === 'b') return { email, kind: 'bridge' };
+  // Anything else must be a positive integer; parseIntegerFlag throws otherwise.
+  const min_blocks = parseIntegerFlag('min_blocks', spec, 1, 1_000_000);
+  return { email, kind: 'depth', min_blocks };
 }
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -112,7 +125,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     localLookbackBlocks: DEFAULTS.localLookbackBlocks,
     dbPath: DEFAULT_DB_PATH,
   };
-  const seenEmails = new Set<string>();
+  // Recipients merge by email: one address can carry both a numeric depth
+  // trigger and a bridge trigger. Duplicate numeric entries collapse (first
+  // wins); duplicate bridge entries collapse (idempotent). The 10-recipient
+  // cap counts distinct emails.
+  const recipientMap = new Map<string, AlertRecipient>();
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -140,13 +157,24 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         args.statusEverySeconds = parseIntegerFlag('--status-every', take(), 1, 86_400);
         break;
       case '--recipient': {
-        const r = parseRecipient(take());
-        if (seenEmails.has(r.email)) break;
-        seenEmails.add(r.email);
-        if (args.recipients.length >= 10) {
-          throw new Error('A maximum of 10 --recipient flags is allowed');
+        const entry = parseRecipient(take());
+        const existing = recipientMap.get(entry.email);
+        if (existing === undefined) {
+          if (recipientMap.size >= 10) {
+            throw new Error('A maximum of 10 --recipient flags is allowed');
+          }
+          recipientMap.set(
+            entry.email,
+            entry.kind === 'bridge'
+              ? { email: entry.email, min_blocks: null, bridge: true }
+              : { email: entry.email, min_blocks: entry.min_blocks, bridge: false }
+          );
+        } else if (entry.kind === 'bridge') {
+          existing.bridge = true; // idempotent; collapses duplicate :b
+        } else if (existing.min_blocks === null) {
+          existing.min_blocks = entry.min_blocks; // first numeric wins
         }
-        args.recipients.push(r);
+        // else: a second numeric entry for this email is dropped (collapse).
         break;
       }
       case '--log-file':
@@ -187,6 +215,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         throw new Error(`Unknown flag: ${flag ?? ''}`);
     }
   }
+  args.recipients = [...recipientMap.values()];
   return args;
 }
 
@@ -208,8 +237,14 @@ Options:
   --poll-interval <seconds>       Seconds between polls, 5–60 (default: 5)
   --lookback <blocks>             Heights to re-check per poll, 1–32 (default: 5)
   --status-every <seconds>        How often to log a status snapshot (default: 60)
-  --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.
-                                  min_blocks defaults to 1. Duplicates collapsed.
+  --recipient <email[:min_blocks|:b]>  Email recipient; repeatable, max 10.
+                                  min_blocks (a positive integer, default 1)
+                                  alerts on re-orgs at least that deep. Use ':b'
+                                  to alert only when a re-org involves the bridge
+                                  (any depth). One address may use both (e.g.
+                                  ':2' and ':b') to get depth alerts plus
+                                  bridge alerts; these merge into a single
+                                  subscription. Duplicates collapsed.
   --log-file <path>               Log file path (default: ~/logs/reorg_monitor.log)
   --no-log-file                   Disable file logging (stderr only)
   --smtp-env-file <path>          Load SMTP_* env vars from a KEY=VALUE file.
@@ -591,22 +626,35 @@ export async function dispatchToRecipients(
     }
   }
   for (const recipient of recipients) {
-    const eligible = events.filter((e) => e.max_depth >= recipient.min_blocks);
-    if (eligible.length === 0) continue;
+    // Two independent triggers (see _pollOnce for the canonical comment): the
+    // numeric depth threshold and the bridge subscription. When the bridge
+    // trigger fires, send the COMPLETE batch so a recipient subscribed both
+    // ways gets one email with the " — bridge transfer" suffix.
+    const numericEligible =
+      recipient.min_blocks !== null
+        ? events.filter((e) => e.max_depth >= recipient.min_blocks!)
+        : [];
+    const numericMatch = numericEligible.length > 0;
+    const bridgeMatch = recipient.bridge && bridgeInfo !== undefined;
+    if (!numericMatch && !bridgeMatch) continue;
+    const eventsToSend = bridgeMatch ? events : numericEligible;
     const sendExtras: {
       subjectSuffix?: string;
       introPrepend?: string;
       bridgeInfo?: BridgeInfo;
     } = {};
-    if (extras.subjectSuffix !== undefined) sendExtras.subjectSuffix = extras.subjectSuffix;
+    const suffix = (extras.subjectSuffix ?? '') + (bridgeMatch ? ' — bridge transfer' : '');
+    if (suffix !== '') sendExtras.subjectSuffix = suffix;
     if (extras.introPrepend !== undefined) sendExtras.introPrepend = extras.introPrepend;
     if (bridgeInfo !== undefined) sendExtras.bridgeInfo = bridgeInfo;
-    sendReorgAlert(recipient.email, network, eligible, peakHeight, sendExtras).catch((err: unknown) => {
-      log('error', 'Re-org alert email failed', {
-        to: recipient.email,
-        error: safeMessage(err),
-      });
-    });
+    sendReorgAlert(recipient.email, network, eventsToSend, peakHeight, sendExtras).catch(
+      (err: unknown) => {
+        log('error', 'Re-org alert email failed', {
+          to: recipient.email,
+          error: safeMessage(err),
+        });
+      }
+    );
   }
 }
 

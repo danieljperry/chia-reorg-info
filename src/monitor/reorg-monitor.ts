@@ -5,7 +5,7 @@ import { Network } from '../network.js';
 import { log } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
 import type { BridgeInfo } from './bridge-info.js';
-import { sendReorgAlert } from './email-alert.js';
+import { type EmailExtras, sendReorgAlert } from './email-alert.js';
 
 export type ReorgEvent = {
   height: number;
@@ -25,7 +25,11 @@ export type ReorgEvent = {
 
 export type AlertRecipient = {
   email: string;
-  min_blocks: number; // only alert if max_depth >= min_blocks (worst-case)
+  /** Numeric depth trigger: alert if max_depth >= min_blocks (worst-case).
+   *  `null` means the recipient has no depth subscription (bridge-only). */
+  min_blocks: number | null;
+  /** Bridge trigger: alert whenever a re-org of any depth involves the bridge. */
+  bridge: boolean;
 };
 
 export type MonitorStatus = {
@@ -285,38 +289,53 @@ export async function _pollOnce(): Promise<void> {
       }
     }
 
-    // Send one batched email per recipient containing all eligible reorgs from this poll.
-    // Filter on max_depth (worst-case true depth) so a re-org with uncertain
-    // depth still alerts everyone whose threshold could be met. Honest by default.
+    // Send at most one batched email per recipient. Two independent triggers:
+    //   - numeric: filter on max_depth (worst-case true depth) so a re-org with
+    //     uncertain depth still alerts everyone whose threshold could be met.
+    //   - bridge: alert whenever this batch involved the bridge, at any depth.
+    // When the bridge trigger fires we send the COMPLETE batch (a superset of any
+    // numeric-eligible subset), so a recipient subscribed both ways still gets a
+    // single email — carrying the " — bridge transfer" suffix.
     for (const recipient of state.alert_recipients) {
-      const eligible = newReorgsForAlert.filter((r) => r.max_depth >= recipient.min_blocks);
-      if (eligible.length > 0) {
-        log('info', 'Dispatching re-org alert', {
-          to: recipient.email,
-          min_blocks: recipient.min_blocks,
-          eligible_count: eligible.length,
-          eligible_heights: eligible.map((r) => r.height),
-          eligible_depth_ranges: eligible.map((r) =>
-            r.depth === r.max_depth ? `${r.depth}` : `${r.depth}-${r.max_depth}`
-          ),
-          has_bridge_info: bridgeInfo !== undefined,
-        });
-        sendReorgAlert(
-          recipient.email,
-          state.network,
-          eligible,
-          peak,
-          bridgeInfo !== undefined ? { bridgeInfo } : {}
-        ).catch((err: unknown) => {
-          state.last_error = `Email alert failed: ${safeMessage(err)}`;
-        });
-      } else if (newReorgsForAlert.length > 0) {
-        log('info', 'Skipping recipient (threshold not met)', {
-          to: recipient.email,
-          min_blocks: recipient.min_blocks,
-          available_max_depths: newReorgsForAlert.map((r) => r.max_depth),
-        });
+      const numericEligible =
+        recipient.min_blocks !== null
+          ? newReorgsForAlert.filter((r) => r.max_depth >= recipient.min_blocks!)
+          : [];
+      const numericMatch = numericEligible.length > 0;
+      const bridgeMatch = recipient.bridge && bridgeInfo !== undefined;
+      if (!numericMatch && !bridgeMatch) {
+        if (newReorgsForAlert.length > 0) {
+          log('info', 'Skipping recipient (no trigger met)', {
+            to: recipient.email,
+            min_blocks: recipient.min_blocks,
+            bridge_subscribed: recipient.bridge,
+            available_max_depths: newReorgsForAlert.map((r) => r.max_depth),
+            bridge_in_batch: bridgeInfo !== undefined,
+          });
+        }
+        continue;
       }
+      const eventsToSend = bridgeMatch ? newReorgsForAlert : numericEligible;
+      log('info', 'Dispatching re-org alert', {
+        to: recipient.email,
+        min_blocks: recipient.min_blocks,
+        bridge_subscribed: recipient.bridge,
+        bridge_match: bridgeMatch,
+        eligible_count: eventsToSend.length,
+        eligible_heights: eventsToSend.map((r) => r.height),
+        eligible_depth_ranges: eventsToSend.map((r) =>
+          r.depth === r.max_depth ? `${r.depth}` : `${r.depth}-${r.max_depth}`
+        ),
+        has_bridge_info: bridgeInfo !== undefined,
+      });
+      const extras: EmailExtras = {};
+      if (bridgeInfo !== undefined) extras.bridgeInfo = bridgeInfo;
+      if (bridgeMatch) extras.subjectSuffix = ' — bridge transfer';
+      sendReorgAlert(recipient.email, state.network, eventsToSend, peak, extras).catch(
+        (err: unknown) => {
+          state.last_error = `Email alert failed: ${safeMessage(err)}`;
+        }
+      );
     }
 
     // Keep memory bounded: drop the oldest observations once the window grows too large.
@@ -430,6 +449,7 @@ export function getStatus(): MonitorStatus {
     alert_recipients: state.alert_recipients.map((r) => ({
       email: redactEmail(r.email),
       min_blocks: r.min_blocks,
+      bridge: r.bridge,
     })),
     poll_count: state.poll_count,
     peak_height: state.peak_height,

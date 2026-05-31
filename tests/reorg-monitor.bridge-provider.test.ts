@@ -96,7 +96,7 @@ describe('bridge info provider wiring in _pollOnce', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'a@b.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'a@b.com', min_blocks: 1, bridge: false }],
       bridge_info_provider: provider,
     });
     await flush(); // let startMonitor's initial poll settle the baseline
@@ -141,7 +141,7 @@ describe('bridge info provider wiring in _pollOnce', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 3,
       network: 'mainnet',
-      alert_recipients: [{ email: 'a@b.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'a@b.com', min_blocks: 1, bridge: false }],
       bridge_info_provider: provider,
     });
     await flush();
@@ -178,7 +178,7 @@ describe('bridge info provider wiring in _pollOnce', () => {
       poll_interval_seconds: 60,
       lookback_blocks: 2,
       network: 'mainnet',
-      alert_recipients: [{ email: 'a@b.com', min_blocks: 1 }],
+      alert_recipients: [{ email: 'a@b.com', min_blocks: 1, bridge: false }],
       bridge_info_provider: provider,
     });
     await flush();
@@ -195,5 +195,98 @@ describe('bridge info provider wiring in _pollOnce', () => {
     expect(getStatus().reorgs).toHaveLength(0);
     expect(provider).not.toHaveBeenCalled();
     expect(mockSendMail).not.toHaveBeenCalled();
+  });
+
+  // --- :b (bridge) subscriptions via _pollOnce ---
+
+  // Drive a baseline poll (no re-org) then a second poll that re-orgs height 99.
+  // `provider` controls whether the batch "involves the bridge".
+  async function pollBaselineThenReorg(
+    recipients: { email: string; min_blocks: number | null; bridge: boolean }[],
+    provider: () => Promise<BridgeInfo | undefined>
+  ): Promise<void> {
+    mockPeak(100, 'a'.repeat(64));
+    mockBlockRecords([
+      makeBlockRecord(98, '8'.repeat(64)),
+      makeBlockRecord(99, '9'.repeat(64)),
+      makeBlockRecord(100, 'a'.repeat(64)),
+    ]);
+    startMonitor({
+      poll_interval_seconds: 60,
+      lookback_blocks: 3,
+      network: 'mainnet',
+      alert_recipients: recipients,
+      bridge_info_provider: vi.fn(provider),
+    });
+    await flush();
+
+    mockPeak(101, 'b'.repeat(64));
+    mockBlockRecords([
+      makeBlockRecord(99, 'd'.repeat(64)),
+      makeBlockRecord(100, 'a'.repeat(64)),
+      makeBlockRecord(101, 'b'.repeat(64)),
+    ]);
+    await _pollOnce();
+    await flush();
+  }
+
+  it('emails a bridge-only recipient when the re-org involves the bridge', async () => {
+    await pollBaselineThenReorg(
+      [{ email: 'b@b.com', min_blocks: null, bridge: true }],
+      () => Promise.resolve(bridgeInfoFixture())
+    );
+    expect(mockSendMail).toHaveBeenCalledTimes(1);
+    const sent = mockSendMail.mock.calls[0]![0] as { subject: string; text: string };
+    expect(sent.subject).toContain(' — bridge transfer');
+    expect(sent.text).toContain('Bridge Info:');
+  });
+
+  it('does NOT email a bridge-only recipient when the re-org does not involve the bridge', async () => {
+    await pollBaselineThenReorg(
+      [{ email: 'b@b.com', min_blocks: null, bridge: true }],
+      () => Promise.resolve(undefined)
+    );
+    expect(getStatus().reorgs).toHaveLength(1);
+    expect(mockSendMail).not.toHaveBeenCalled();
+  });
+
+  it('sends a merged recipient one email with the suffix on a bridge re-org', async () => {
+    // depth-1 re-org (below min_blocks 2) but bridge match drives the send.
+    await pollBaselineThenReorg(
+      [{ email: 'both@b.com', min_blocks: 2, bridge: true }],
+      () => Promise.resolve(bridgeInfoFixture())
+    );
+    expect(mockSendMail).toHaveBeenCalledTimes(1);
+    const sent = mockSendMail.mock.calls[0]![0] as { subject: string; text: string };
+    expect(sent.subject).toContain(' — bridge transfer');
+    expect(sent.text).toContain('Bridge Info:');
+  });
+
+  it('surfaces each recipient bridge flag (and null min_blocks) through getStatus, email redacted', () => {
+    startMonitor({
+      poll_interval_seconds: 60,
+      lookback_blocks: 3,
+      network: 'mainnet',
+      alert_recipients: [
+        { email: 'depth@example.com', min_blocks: 3, bridge: false },
+        { email: 'bridge@example.com', min_blocks: null, bridge: true },
+        { email: 'both@example.com', min_blocks: 2, bridge: true },
+      ],
+      bridge_info_provider: vi.fn(() => Promise.resolve(undefined)),
+    });
+
+    const got = getStatus().alert_recipients;
+    // The (min_blocks, bridge) pairs must survive into the status surface.
+    expect(got.map((r) => ({ min_blocks: r.min_blocks, bridge: r.bridge }))).toEqual([
+      { min_blocks: 3, bridge: false },
+      { min_blocks: null, bridge: true },
+      { min_blocks: 2, bridge: true },
+    ]);
+    // Emails are redacted (e.g. "d***@example.com"): raw local-parts must not
+    // appear verbatim, but the redaction marker + domain should.
+    const emails = got.map((r) => r.email);
+    expect(emails.some((e) => e.includes('depth@'))).toBe(false);
+    expect(emails.some((e) => e.includes('bridge@'))).toBe(false);
+    for (const e of emails) expect(e).toContain('***@');
   });
 });
