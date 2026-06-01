@@ -89,7 +89,9 @@ jobs:
         with:
           # Pin to a Python version chia-blockchain supports.
           python-version: '3.11'
-          cache: 'pip'
+          # No `cache: pip` — this repo has no requirements.txt/pyproject.toml
+          # for setup-python to key the cache on, and chia is installed ad-hoc
+          # below. Caching would fail the step trying to find a lockfile.
 
       - name: Install chia-blockchain
         run: |
