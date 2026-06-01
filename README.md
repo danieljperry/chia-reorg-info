@@ -471,7 +471,7 @@ npm run build            # compile to dist/
 
 CI runs lint, typecheck, and the test suite with coverage on every push to `main` and on PRs — see `.github/workflows/ci.yml`. The coverage HTML report is uploaded as a workflow artifact (`coverage-report`).
 
-A second, **advisory** `chia-required` job installs real `chia-blockchain` and runs `tests/chia-api-smoke.test.ts` to catch upstream chia changes (renamed import paths / methods) that the `tests/fixtures/fake_chia` stub can't. It is **not** a required status check — a chia packaging issue never blocks a merge — and the smoke test self-skips when chia isn't importable, so the normal suite is unaffected locally.
+A second, **advisory** `chia-required` job installs real `chia-blockchain` and runs `tests/chia-api-smoke.test.ts` to catch upstream chia changes (renamed import paths / methods) that the `tests/fixtures/fake_chia` stub can't. It also runs `tests/chia-real-blocks.test.ts`, which round-trips real committed block fixtures (`tests/fixtures/real_blocks/`) through the `_decode_*.py` helpers and asserts the decoded output — catching serialization/field-semantics drift, not just renames. The job is **not** a required status check — a chia packaging issue never blocks a merge — and both tests self-skip when chia isn't importable, so the normal suite is unaffected locally.
 
 ## License
 

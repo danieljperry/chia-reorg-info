@@ -93,6 +93,12 @@ jobs:
           # for setup-python to key the cache on, and chia is installed ad-hoc
           # below. Caching would fail the step trying to find a lockfile.
 
+      # The real-block round-trip test (tests/chia-real-blocks.test.ts) builds a
+      # synthetic full_blocks DB via the sqlite3 CLI. Not present by default in
+      # this job (the main `test` job installs it separately).
+      - name: Install sqlite3 CLI
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
       - name: Install chia-blockchain
         run: |
           python -m venv "$HOME/chia-venv"
@@ -102,9 +108,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: chia API smoke test
+      - name: chia API smoke + real-block round-trip
         run: |
-          # Point the smoke test at the venv we just built. $HOME expands in
-          # the shell here (it would not in a YAML `env:` mapping value).
+          # Point the chia-gated tests at the venv we just built. $HOME expands
+          # in the shell here (it would not in a YAML `env:` mapping value).
           export CHIA_PYTHON="$HOME/chia-venv/bin/python"
-          npx vitest run tests/chia-api-smoke.test.ts
+          npx vitest run tests/chia-api-smoke.test.ts tests/chia-real-blocks.test.ts
