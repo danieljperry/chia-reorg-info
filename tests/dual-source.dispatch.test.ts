@@ -85,8 +85,14 @@ describe('dual-source dispatch outcomes', () => {
       dispatched.push(o);
     });
     c.noteReorg(coinsetEvt(100, 102, 3));
+    // settle_at=102. A single-source (unpaired) event is held until
+    // settle_at + SINGLE_SOURCE_MARGIN (=6) so a late local counterpart could
+    // still pair; +2 only makes it eligible to pair, not to dispatch alone.
     await c.notePeak('coinset', 104);
-    await c.notePeak('local', 104); // local saw no reorg
+    await c.notePeak('local', 104); // local saw no reorg; gate=104 < 108 → held
+    expect(dispatched).toHaveLength(0);
+    await c.notePeak('coinset', 108);
+    await c.notePeak('local', 108); // gate=108 ≥ 102+6 → released single-source
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]?.kind).toBe('coinset-only');
   });
@@ -97,8 +103,12 @@ describe('dual-source dispatch outcomes', () => {
       dispatched.push(o);
     });
     c.noteReorg(localEvt(100, 102, 3));
+    // settle_at=102; held as single-source until settle_at + 6 = 108.
     await c.notePeak('coinset', 104); // coinset saw no reorg
-    await c.notePeak('local', 104);
+    await c.notePeak('local', 104); // gate=104 < 108 → held
+    expect(dispatched).toHaveLength(0);
+    await c.notePeak('coinset', 108);
+    await c.notePeak('local', 108); // gate=108 ≥ 108 → released
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]?.kind).toBe('local-only');
   });
@@ -134,10 +144,13 @@ describe('dual-source dispatch outcomes', () => {
     const c = createDualSource('both', (o) => {
       dispatched.push(o);
     });
-    c.noteReorg(coinsetEvt(100, 100, 1, 1)); // depth=1, exact
-    c.noteReorg(localEvt(100, 102, 3));      // depth=3, doesn't match
-    await c.notePeak('coinset', 104);
-    await c.notePeak('local', 104);
+    c.noteReorg(coinsetEvt(100, 100, 1, 1)); // depth=1, exact, settle_at=100
+    c.noteReorg(localEvt(100, 102, 3));      // depth=3, settle_at=102, doesn't match
+    // Both are settled-and-eligible-to-pair at +2 but DON'T match each other,
+    // so each must wait out the single-source window (settle_at + 6) before
+    // being declared single-source. Highest gate needed: 102 + 6 = 108.
+    await c.notePeak('coinset', 108);
+    await c.notePeak('local', 108);
     expect(dispatched).toHaveLength(2);
     const kinds = dispatched.map((o) => o.kind).sort();
     expect(kinds).toEqual(['coinset-only', 'local-only']);
@@ -148,10 +161,12 @@ describe('dual-source dispatch outcomes', () => {
     const c = createDualSource('both', (o) => {
       dispatched.push(o);
     });
-    c.noteReorg(coinsetEvt(100, 100, 1, 1));
-    c.noteReorg(localEvt(101, 101, 1));
-    await c.notePeak('coinset', 103);
-    await c.notePeak('local', 103);
+    c.noteReorg(coinsetEvt(100, 100, 1, 1)); // settle_at=100
+    c.noteReorg(localEvt(101, 101, 1));      // settle_at=101; different height
+    // No match (different heights), so each waits out the single-source window.
+    // Highest gate needed: 101 + 6 = 107.
+    await c.notePeak('coinset', 107);
+    await c.notePeak('local', 107);
     expect(dispatched).toHaveLength(2);
     const kinds = dispatched.map((o) => o.kind).sort();
     expect(kinds).toEqual(['coinset-only', 'local-only']);
@@ -162,10 +177,12 @@ describe('dual-source dispatch outcomes', () => {
     const c = createDualSource('both', (o) => {
       dispatched.push(o);
     });
-    c.noteReorg(coinsetEvt(100, 100, 1));
+    c.noteReorg(coinsetEvt(100, 100, 1)); // settle_at=100
     await c.notePeak('coinset', 200); // far past, but local hasn't reported yet
     expect(dispatched).toHaveLength(0); // gate is min(200, null) = -Inf
-    await c.notePeak('local', 102); // gate = min(200, 102) = 102, high+2 = 102 → release
+    await c.notePeak('local', 102); // gate = min(200, 102) = 102 < 106 → still held
+    expect(dispatched).toHaveLength(0);
+    await c.notePeak('local', 106); // gate = min(200, 106) = 106 ≥ 100+6 → release
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]?.kind).toBe('coinset-only');
   });
@@ -300,5 +317,65 @@ describe('dual-source dispatch outcomes', () => {
     expect(c._state().pending[0]!.low).toBe(1_000_001);
     expect(c._state().pending[PENDING_BUFFER_CAP - 1]!.low).toBe(2_000_000);
     expect(dispatched).toHaveLength(0);
+  });
+
+  it('incident regression (8801066): local settles first but is HELD for the late coinset counterpart → single matched', async () => {
+    // Real-world reproduction: a 1-block reorg at 8801066. The local poller
+    // detected it ~10s before Coinset; Coinset observed it 3 blocks late
+    // (depth 1, max_depth 4). Pre-fix, the local event released alone at
+    // settle_at + 2 before the Coinset event even entered the buffer → two
+    // single-source emails. Post-fix, the unpaired local event is held until
+    // settle_at + SINGLE_SOURCE_MARGIN, giving the late Coinset event time to
+    // arrive and pair into ONE matched outcome.
+    const dispatched: DispatchOutcome[] = [];
+    const c = createDualSource('both', (o) => {
+      dispatched.push(o);
+    });
+
+    // Local detects at 8801066 and its peak begins advancing.
+    c.noteReorg(localEvt(8801066, 8801066, 1)); // settle_at=8801066
+    await c.notePeak('local', 8801068); // local gate alone would be 8801068
+    // Coinset peak is current (it tracks the tip) even though it detected late.
+    await c.notePeak('coinset', 8801069);
+    // gate = min(8801069, 8801068) = 8801068 ≥ settle_at+2 (8801068): the local
+    // event is now PAIR-eligible, but has no counterpart yet and is NOT past
+    // the single-source margin (8801066+6=8801072), so it must be HELD.
+    expect(dispatched).toHaveLength(0);
+
+    // ~10s later Coinset reports the same reorg, observed 3 blocks late.
+    c.noteReorg({
+      source: 'coinset',
+      low: 8801066,
+      high: 8801066 + (4 - 1), // widened to 8801069
+      settle_at: 8801066, // observed top, un-widened
+      depth: 1,
+      max_depth: 4,
+      detected_at_iso: '2026-05-31T01:29:49.652Z',
+    });
+    await c.notePeak('coinset', 8801069);
+    await c.notePeak('local', 8801069);
+    // Both present and pair-eligible (gate=8801069 ≥ 8801068) → one matched,
+    // dispatched immediately without waiting out the single-source window.
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.kind).toBe('matched');
+  });
+
+  it('genuine single-source still fires, but only after SINGLE_SOURCE_MARGIN (not at +2)', async () => {
+    const dispatched: DispatchOutcome[] = [];
+    const c = createDualSource('both', (o) => {
+      dispatched.push(o);
+    });
+    c.noteReorg(localEvt(8801066, 8801066, 1)); // settle_at=8801066
+
+    // Between +2 and +6 the event is held (waiting for a possible counterpart).
+    await c.notePeak('coinset', 8801070);
+    await c.notePeak('local', 8801070); // gate=8801070 ∈ [+2=68, +6=72) → held
+    expect(dispatched).toHaveLength(0);
+
+    // Once the gate passes settle_at + 6 with no counterpart, it fires alone.
+    await c.notePeak('coinset', 8801072);
+    await c.notePeak('local', 8801072); // gate=8801072 ≥ 8801066+6 → local-only
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.kind).toBe('local-only');
   });
 });
