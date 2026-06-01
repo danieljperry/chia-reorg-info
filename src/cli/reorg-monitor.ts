@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -23,6 +24,7 @@ import {
   type ReorgEvent,
 } from '../monitor/reorg-monitor.js';
 import { type Network, NETWORKS } from '../network.js';
+import { resolveChiaPython } from '../util/chia-python.js';
 import { loadEnvFile } from '../util/env-file.js';
 import { closeLogger, log, setLogFile, setStderrEnabled } from '../util/logger.js';
 import { safeMessage } from '../util/safe-message.js';
@@ -78,6 +80,32 @@ export function checkDbPathReadable(path: string): string | null {
     return `file exists but is not readable by this user (uid=${process.getuid?.() ?? '?'}) — check file permissions`;
   }
   return null;
+}
+
+// Best-effort startup probe: when a `local`/`both` source is selected, the
+// bash poller shells out to a chia-capable Python to decode orphan BlockRecords.
+// If that interpreter can't `import chia`/`chia_rs`, decoding silently fails and
+// only surfaces inside individual alert-email bodies (e.g. the 8801066 incident).
+// Warn loudly at startup instead. Advisory only — never blocks the monitor.
+function warnIfChiaMissing(): void {
+  const py = resolveChiaPython();
+  let ok: boolean;
+  try {
+    const r = spawnSync(py, ['-c', 'import chia, chia_rs'], { encoding: 'utf8' });
+    ok = r.status === 0;
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    log(
+      'warn',
+      'chia not importable by the resolved Python; local block-record decoding will fail',
+      {
+        resolved_python: py,
+        hint: 'set CHIA_PYTHON to an interpreter whose venv has chia + chia_rs installed',
+      }
+    );
+  }
 }
 
 function parseIntegerFlag(name: string, raw: string, min: number, max: number): number {
@@ -329,6 +357,8 @@ export async function runReorgMonitorCli(argv: readonly string[]): Promise<numbe
       );
       return 2;
     }
+    // DB is readable; warn (don't fail) if the orphan-decode Python lacks chia.
+    warnIfChiaMissing();
   }
 
   // Resolve the bash script path relative to this module's location.

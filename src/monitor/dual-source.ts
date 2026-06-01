@@ -98,6 +98,25 @@ export type DualSourceMode = 'coinset' | 'local' | 'both';
  */
 export const PENDING_BUFFER_CAP = 10_000;
 
+/**
+ * Blocks past a cluster's observed top (`settle_at`) before it's considered
+ * "settled" — finalized enough that the chain won't still be thrashing at that
+ * height. An event is eligible to PAIR with a counterpart once both are settled.
+ */
+export const SETTLE_MARGIN = 2;
+
+/**
+ * Blocks past `settle_at` before an unpaired event is declared single-source
+ * (coinset-only / local-only). Larger than SETTLE_MARGIN so that when the two
+ * sources detect the same reorg a few blocks/seconds apart (e.g. one observed
+ * it late), the earlier event is HELD long enough for the slower source's
+ * counterpart to arrive and pair, rather than being dispatched alone. Only the
+ * single-source decision waits; `matched` pairs dispatch as soon as both are
+ * present and settled. `both` mode only — single-source modes have nothing to
+ * wait for and release at SETTLE_MARGIN.
+ */
+export const SINGLE_SOURCE_MARGIN = 6;
+
 type State = {
   mode: DualSourceMode;
   pending: SourceEvent[];
@@ -173,35 +192,49 @@ export function createDualSource(mode: DualSourceMode, dispatch: DispatchHook) {
     const gate = releaseGate();
     if (gate === -Infinity) return;
 
-    const stillPending: SourceEvent[] = [];
-    const released: SourceEvent[] = [];
-    for (const evt of state.pending) {
-      // Use settle_at, not high — for Coinset events `high` is widened by
-      // (max_depth - depth) so a local counterpart with the same observed
-      // top would release sooner and miss the pairing. settle_at is the
-      // un-widened observed top, so both sources settle in the same window.
-      if (evt.settle_at + 2 <= gate) released.push(evt);
-      else stillPending.push(evt);
-    }
-    state.pending = stillPending;
-
-    // Process released events. In both-source mode, look for a matching
-    // counterpart among released events from the OTHER source first; pair
-    // them up. Anything left over is a single-source detection.
+    // Single-source modes: nothing to pair with, so release as soon as settled
+    // and dispatch immediately. settle_at (not high) is the un-widened observed
+    // top — see the SourceEvent docstring.
     if (state.mode !== 'both') {
-      for (const evt of released) {
-        await state.dispatch(
-          evt.source === 'coinset'
-            ? { kind: 'coinset-only', event: evt }
-            : { kind: 'local-only', event: evt }
-        );
+      const stillPending: SourceEvent[] = [];
+      for (const evt of state.pending) {
+        if (evt.settle_at + SETTLE_MARGIN <= gate) {
+          await state.dispatch(
+            evt.source === 'coinset'
+              ? { kind: 'coinset-only', event: evt }
+              : { kind: 'local-only', event: evt }
+          );
+        } else {
+          stillPending.push(evt);
+        }
       }
+      state.pending = stillPending;
       return;
     }
 
-    const coinsetReleases = released.filter((e) => e.source === 'coinset');
-    const localReleases = released.filter((e) => e.source === 'local');
+    // Both mode, two phases over the same gate:
+    //
+    //   Phase 1 (pair): events settled past SETTLE_MARGIN are eligible to pair.
+    //     Pair coinset↔local and dispatch `matched` immediately; remove both.
+    //   Phase 2 (single-source): any STILL-unpaired event settled past the
+    //     larger SINGLE_SOURCE_MARGIN is declared single-source and dispatched.
+    //     Events settled but not yet past SINGLE_SOURCE_MARGIN stay pending so a
+    //     late counterpart from the other source can still pair with them.
+    //
+    // This split is what fixes the duplicate-email race: when the two sources
+    // detect the same reorg a few blocks apart, the earlier one is held (not
+    // dispatched alone) until the slower one arrives and pairs.
+    const pairEligible: SourceEvent[] = [];
+    const notYetPairEligible: SourceEvent[] = [];
+    for (const evt of state.pending) {
+      if (evt.settle_at + SETTLE_MARGIN <= gate) pairEligible.push(evt);
+      else notYetPairEligible.push(evt);
+    }
+
+    const coinsetReleases = pairEligible.filter((e) => e.source === 'coinset');
+    const localReleases = pairEligible.filter((e) => e.source === 'local');
     const usedLocal = new Set<number>(); // indices in localReleases already paired
+    const unpaired: SourceEvent[] = [];
 
     for (const cEvt of coinsetReleases) {
       let pairedIdx: number | null = null;
@@ -220,14 +253,28 @@ export function createDualSource(mode: DualSourceMode, dispatch: DispatchHook) {
           local: localReleases[pairedIdx]!,
         });
       } else {
-        await state.dispatch({ kind: 'coinset-only', event: cEvt });
+        unpaired.push(cEvt);
       }
     }
-
     for (let i = 0; i < localReleases.length; i++) {
-      if (usedLocal.has(i)) continue;
-      await state.dispatch({ kind: 'local-only', event: localReleases[i]! });
+      if (!usedLocal.has(i)) unpaired.push(localReleases[i]!);
     }
+
+    // An unpaired-but-settled event is only declared single-source once it has
+    // also passed SINGLE_SOURCE_MARGIN; otherwise hold it for a late counterpart.
+    const stillPending: SourceEvent[] = [...notYetPairEligible];
+    for (const evt of unpaired) {
+      if (evt.settle_at + SINGLE_SOURCE_MARGIN <= gate) {
+        await state.dispatch(
+          evt.source === 'coinset'
+            ? { kind: 'coinset-only', event: evt }
+            : { kind: 'local-only', event: evt }
+        );
+      } else {
+        stillPending.push(evt);
+      }
+    }
+    state.pending = stillPending;
   }
 
   function _state(): Readonly<State> {

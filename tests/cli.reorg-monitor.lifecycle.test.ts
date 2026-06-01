@@ -21,7 +21,11 @@ const agentMocks = createChiaAgentMocks();
 vi.mock('chia-agent/api/rpc/full_node/index.js', () => agentMocks);
 
 const spawnMock = vi.fn();
-vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+// spawnSync is used by the startup chia-import probe (warnIfChiaMissing →
+// resolveChiaPython). Return a success shape so the probe is a no-op here and
+// these tests stay focused on the polling lifecycle.
+const spawnSyncMock = vi.fn(() => ({ status: 0, stdout: '', stderr: '' }));
+vi.mock('node:child_process', () => ({ spawn: spawnMock, spawnSync: spawnSyncMock }));
 
 const sendMailMock = vi.fn().mockResolvedValue({ messageId: 'test' });
 const createTransportMock = vi.fn(() => ({ sendMail: sendMailMock }));
@@ -181,8 +185,12 @@ describe('runReorgMonitorCli polling lifecycle (integration)', () => {
   });
 
   it('--source local spawns the bash script and dispatches per-recipient on reorg', async () => {
-    // Mock spawn to return one reorg per poll.
-    spawnMock.mockReturnValue(
+    // Mock spawn to return one reorg per poll. Use mockImplementation (not
+    // mockReturnValue) so EACH spawn gets a FRESH fake child — a single shared
+    // child's stdout stream drains and 'close' fires only once, so any second
+    // spawn in the same flow (e.g. the bridge-decode helper) would hang on a
+    // dead child. Fresh-per-call matches real spawn() semantics.
+    spawnMock.mockImplementation(() =>
       fakeChild({
         stdout: JSON.stringify({
           network: 'mainnet',
@@ -258,8 +266,10 @@ describe('runReorgMonitorCli polling lifecycle (integration)', () => {
         ],
       });
 
-    // Local side: matching reorg at the same height, peak past settle.
-    spawnMock.mockReturnValue(
+    // Local side: matching reorg at the same height, peak past settle. Fresh
+    // child per spawn (see the --source local test) so the bridge-decode helper
+    // spawn doesn't reuse a drained child.
+    spawnMock.mockImplementation(() =>
       fakeChild({
         stdout: JSON.stringify({
           network: 'mainnet',
