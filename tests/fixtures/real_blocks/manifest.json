@@ -1,0 +1,21 @@
+{
+  "canonical": {
+    "height": 8806964,
+    "header_hash": "903bfea00e82d3fcc7c37625b9eb3238ca34231dca24cbf26a15943e25fbc323",
+    "block_record_bin": "canonical.block_record.bin",
+    "block_bin": "canonical.block.bin",
+    "expect": {
+      "weight": 54900006480,
+      "total_iters": 98203845113524,
+      "signage_point_index": 9,
+      "timestamp": 1780301709,
+      "header_hash": "0x903bfea00e82d3fcc7c37625b9eb3238ca34231dca24cbf26a15943e25fbc323"
+    }
+  },
+  "bridge": {
+    "height": 7357253,
+    "header_hash": "15259cf96677254420ee0ba592a8cd6a4cee13b3eb8fc1a9bd7085e3c4515830",
+    "block_bin": "bridge.block.bin",
+    "target_hash": "a09eb1ea8c6e83c0166801dabcf4a70d361cc7f6d89c4a46bcd400ac57719037"
+  }
+}
