@@ -65,3 +65,44 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 30
+
+  # Advisory job: installs REAL chia-blockchain and asserts that the import
+  # paths + methods scripts/_decode_*.py rely on still resolve. Catches upstream
+  # chia drift that the tests/fixtures/fake_chia stub cannot. Intentionally NOT
+  # in the branch-protection required checks — a chia packaging hiccup or a slow
+  # install must never block a merge. The smoke test self-skips when chia isn't
+  # importable, so it's inert everywhere except this job.
+  chia-required:
+    name: chia-required (import + API smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Pin to a Python version chia-blockchain supports.
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install chia-blockchain
+        run: |
+          python -m venv "$HOME/chia-venv"
+          "$HOME/chia-venv/bin/pip" install --upgrade pip
+          "$HOME/chia-venv/bin/pip" install chia-blockchain
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: chia API smoke test
+        run: |
+          # Point the smoke test at the venv we just built. $HOME expands in
+          # the shell here (it would not in a YAML `env:` mapping value).
+          export CHIA_PYTHON="$HOME/chia-venv/bin/python"
+          npx vitest run tests/chia-api-smoke.test.ts
