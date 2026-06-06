@@ -2,8 +2,17 @@
 
 This repo was vibe coded with Claude Opus 4.7. It provides two tools for analyzing Chia blockchain reorgs.
 
-1. **Reorg Finder** — a bash script that queries a local Chia v2 SQLite database for reorgs (indicated by heights that have multiple block records, includes orphaned siblings). Good for retrospective audits.
-2. **Reorg Monitor** — a long-running Node CLI (also installable as a Linux service) that polls the chain in real time and detects reorgs as they happen. It also optionally sends email alerts, which can be configured by reorg depth (e.g. email an on-call employee whenever a 1-block reorg is detected, and also email the lead engineer whenever a 4-block reorg is detected).
+1. **Reorg Finder**
+  * A bash script that queries a local Chia v2 SQLite database for reorgs (indicated by heights that have multiple block records, includes orphaned siblings)
+  * Good for retrospective audits
+  * Includes optional diagnostic tools
+  * Optionally can detect when bridge transfers were involved in a reorg
+2. **Reorg Monitor**
+  * A long-running Node CLI (also installable as a Linux service) that polls the chain in real time and detects reorgs as they happen
+  * Optionally sends email alerts, which can be configured by reorg depth and bridge involvement, e.g.
+    * Email an on-call employee whenever a 1-block reorg is detected, and
+    * Email the lead engineer whenever a 4-block reorg is detected, and
+    * Email a bridge engineer whenever a bridge reorg is detected
 
 Both of these tools currently require Linux (tested on Ubuntu only). They should work on Ubuntu server without a GUI, but I haven't tested this. I could add more OS options if there is interest.
 
@@ -19,7 +28,7 @@ A few caveats:
 * Blockchain databases are not all identical. You may have a clean copy, without any orphaned blocks, in which case you won't find any historical reorgs. Even when looking for reorgs in real time, it is common for different nodes to report different results. This is merely a facet of Chia's decentralized architecture. If your local results don't match those of Coinset, it doesn't necessarily indicate an issue.
 * When using the reorg finder, the times listed are approximate, out of necessity. This is because non-tx blocks (about 2/3 of all blocks) don't come with a canonical timestamp. The script will therefore list the timestamp from the previous tx block as the starting point, and the timestamp from the next tx block as the ending point of the reorg.
 * If you are interested in sending an email when reorgs are detected, you will need to set up your own SMTP service locally.
-* Reorgs of a single block can occur dozens of times daily. If you are emailing your results, they will be noisy unless you increase the threshold to be something higher than 1.
+* Reorgs of a single block can occur multiple times daily. If you are emailing your results, they will be noisy unless you increase the threshold to be something higher than 1.
 
 ## Install
 
@@ -49,29 +58,16 @@ Requires Node ≥ 20. The bash script also requires the `sqlite3` CLI (`sudo apt
 $ scripts/reorg-finder.sh -h
 reorg-finder.sh — scan the local Chia full-node DB for heights that
 have multiple blocks (i.e. re-orged heights with orphaned siblings).
-
-Requires read access to a Chia v2 full-node database file. By default this
-is the mainnet DB at ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite; pass
--d to point at a different path (e.g. testnet11 or a copy on another disk).
-
-Step 1: find heights in the range that have >1 block.
-Step 2: for each such height, walk backward one block at a time (up to LIMIT
-        blocks) so a re-org that extends below the queried range is captured
-        in full. Group consecutive re-orged heights into clusters; each
-        cluster is one re-org event whose size is the cluster length.
-Step 3: list every block at the resulting heights with their hashes and
-        whether they're on the canonical chain.
-
+...
 Usage:
   ./reorg-finder.sh [-n COUNT] [-e END_HEIGHT] [-l LIMIT] [-m MIN_DEPTH]
                     [-q [true|false]] [-qq [true|false]] [-d DB_PATH]
-
-  -n COUNT       Number of blocks to examine (default: 10)…
-  -e END_HEIGHT  Highest height to examine (default: full node peak via RPC)
+                    [--json] [--peak-from rpc|db] [--compare-proofs]
+                    [--aggregate-stats] [-b|--bridge]
   ...
 ```
 
-#### Scan the last 10 blocks (the default), with the header hashes for every block involved in a re-org
+#### Scan the last 10 blocks (the default), show header hashes for every block involved in a re-org
 
 ```bash
 $ scripts/reorg-finder.sh
@@ -120,6 +116,16 @@ Found 22 reorgs of at least 7 blocks in the specified range.
 ```
 
 (A typical mainnet node sees very few re-orgs deeper than 3 blocks. `-n g` is shorthand for "scan from `END_HEIGHT` down to genesis"; on a full mainnet DB this is a full-table scan and can take minutes to complete.)
+
+#### Find reorgs that involved the bridge, ending at block 7357300, counting back 100 blocks, using a non-default database path
+
+```bash
+scripts/reorg-finder.sh -e 7357300 -n 100 -b -d /home/you/.chia/mainnet/db/blockchain_v2_mainnet.sqlite
+Scanning heights 7357201..7357300 (100 blocks) in /home/you/.chia/mainnet/db/blockchain_v2_mainnet.sqlite
+Found a reorg of 1 block(s) (heights 7357253..7357253) (2025-07-21 20:02:07 HKT):
+Per-block detail (in_main_chain=1 is canonical, 0 is orphaned):
+...
+```
 
 #### Machine-readable output
 
@@ -214,7 +220,7 @@ Bridge Info:
 
 ## Reorg Monitor — as a CLI on Linux
 
-The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent. See the "Email setup" section below to set up the email env file.
+The monitor polls the chain every few seconds, compares each height's current header hash to what it saw last time, and clusters consecutive changed heights into single re-org events. Every detected re-org is logged; if SMTP is configured and recipients are listed, alert emails are sent. See the [Email setup](#email-setup) section below to set up the email env file.
 
 ### Detection sources
 
@@ -238,27 +244,36 @@ stderr). Send SIGINT (Ctrl-C) to stop.
 
 Options:
   --network <mainnet|testnet11>   Network to monitor (default: mainnet)
-  --source <coinset|local|both>   Detection source(s) (default: coinset)
-  --poll-interval <seconds>       Coinset poll interval, 5–60 (default: 5)
-  --lookback <blocks>             Coinset heights re-checked per poll, 1–32 (default: 5)
-  --local-poll-interval <seconds> Local-DB poll interval, 5–3600 (default: 10)
-  --local-lookback <blocks>       Local-DB heights re-checked per poll, 1–1000 (default: 5)
-  --db-path <path>                Path to blockchain_v2_mainnet.sqlite
-                                  (default: $CHIA_DB or ~/.chia/mainnet/db/…)
+  --poll-interval <seconds>       Seconds between polls, 5–60 (default: 5)
+  --lookback <blocks>             Heights to re-check per poll, 1–32 (default: 5)
   --status-every <seconds>        How often to log a status snapshot (default: 60)
-  --recipient <email[:min_blocks|:b]>  Email recipient; repeatable, max 10.
-                                  min_blocks (positive integer, default 1) alerts
-                                  on re-orgs at least that deep. ':b' alerts only
-                                  when a re-org involves the bridge (any depth).
-                                  One address may use both (e.g. ':2' and ':b');
-                                  they merge into one subscription. Duplicates
-                                  collapsed.
+  --recipient <email[:min_blocks]>  Email recipient; repeatable, max 10.
+                                  min_blocks defaults to 1. Duplicates collapsed.
   --log-file <path>               Log file path (default: ~/logs/reorg_monitor.log)
   --no-log-file                   Disable file logging (stderr only)
   --smtp-env-file <path>          Load SMTP_* env vars from a KEY=VALUE file.
                                   Comments (#) and quoted values allowed.
                                   Shell-exported vars take precedence.
-  --help, -h                      Show this help
+
+Source selection (which detector(s) to run — default: coinset):
+  --source <coinset|local|both>   coinset: today's behavior, polls coinset.org.
+                                  local:   polls the local Chia SQLite DB via
+                                           scripts/reorg-finder.sh; no network.
+                                  both:    runs both pollers and waits until
+                                           2 blocks past each reorg's high before
+                                           emitting an alert that says whether
+                                           the sources agreed.
+  --local-poll-interval <seconds> Seconds between local DB scans, 5–3600
+                                  (default: 10). Independent of --poll-interval.
+  --local-lookback <blocks>       Heights to re-check per local scan, 1–1000
+                                  (default: 5). Independent of --lookback.
+  --db-path <path>                Local SQLite DB path. Required when --source
+                                  includes 'local'. Defaults to $CHIA_DB if
+                                  set, otherwise ~/.chia/mainnet/db/blockchain_v2_mainnet.sqlite.
+
+  --help, -h                      Show this help and exit
+
+Email alerts require SMTP_HOST; see README for full SMTP env var list.
 ```
 
 Example (Coinset only — the default): monitor mainnet, log to a custom path, alert three addresses — one at any re-org depth, one only for ≥3-block re-orgs, and one only when a re-org involves the bridge (`:b`) — loading SMTP credentials from a dotenv file:
