@@ -1,4 +1,4 @@
-# chia-reorg-info
+# Chia Reorg Info
 
 This repo was vibe coded with Claude Opus 4.7. It provides two tools for analyzing Chia blockchain reorgs.
 
